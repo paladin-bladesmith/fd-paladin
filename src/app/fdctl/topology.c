@@ -140,7 +140,7 @@ fd_topo_initialize( config_t * config ) {
                    fd_topos_tile_in_net(  topo,                          "metric_in", "shred_net",    j,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED ); /* No reliable consumers of networking fragments, may be dropped or overrun */
 
   FOR(quic_tile_cnt) for( ulong j=0UL; j<net_tile_cnt; j++ )
-                       fd_topob_tile_in(  topo, "quic",    i,            "metric_in", "net_quic",     j,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED ); /* No reliable consumers of networking fragments, may be dropped or overrun */
+                       fd_topob_tile_in( topo, "quic",    i,            "metric_in", "net_quic",     j,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED ); /* No reliable consumers of networking fragments, may be dropped or overrun */
   FOR(quic_tile_cnt)   fd_topob_tile_out( topo, "quic",    i,                         "quic_verify",  i                                                  );
   FOR(quic_tile_cnt)   fd_topob_tile_out( topo, "quic",    i,                         "quic_net",     i                                                  );
   /* All verify tiles read from all QUIC tiles, packets are round robin. */
@@ -257,15 +257,22 @@ fd_topo_initialize( config_t * config ) {
     fd_topob_wksp( topo, "sign_pack"    );
     fd_topob_wksp( topo, "bundle"       );
 
-    /**/                 fd_topob_link( topo, "bundle_verif", "bundle_verif", config->tiles.verify.receive_buffer_size, FD_TPU_PARSED_MTU,         1UL );
-    /**/                 fd_topob_link( topo, "bundle_sign",  "bundle_sign",  65536UL,                                  9UL,                       1UL );
+    ulong bundle_tile_cnt = 1;
+    for( ulong i = 0; i<MAX_BLOCK_ENGINES; i++ ){
+      if( 0==strcmp( config->tiles.bundle.urls[ i ], "" ) ) break;
+      bundle_tile_cnt++;
+    }
+
+    FOR(bundle_tile_cnt) fd_topob_link( topo, "bundle_verif", "bundle_verif", config->tiles.verify.receive_buffer_size, FD_TPU_PARSED_MTU,         1UL );
+    FOR(bundle_tile_cnt) fd_topob_link( topo, "bundle_sign",  "bundle_sign",  65536UL,                                  9UL,                       1UL );
     /**/                 fd_topob_link( topo, "sign_bundle",  "sign_bundle",  128UL,                                    64UL,                      1UL );
     /**/                 fd_topob_link( topo, "pack_sign",    "pack_sign",    65536UL,                                  1232UL,                    1UL );
     /**/                 fd_topob_link( topo, "sign_pack",    "sign_pack",    128UL,                                    64UL,                      1UL );
 
-    /**/                 fd_topob_tile( topo, "bundle",  "bundle",  "metric_in", tile_to_cpu[ topo->tile_cnt ], 0, 1 );
+    FOR(bundle_tile_cnt) fd_topob_tile( topo, "bundle",  "bundle",  "metric_in", tile_to_cpu[ topo->tile_cnt ], 0, 1 );
 
-    /**/                 fd_topob_tile_out( topo, "bundle", 0UL, "bundle_verif", 0UL );
+    FOR(bundle_tile_cnt) for( ulong j=0; j<verify_tile_cnt; j++)
+                         fd_topob_tile_out( topo, "bundle", i, "bundle_verif", j );
     FOR(verify_tile_cnt) fd_topob_tile_in(  topo, "verify", i,             "metric_in", "bundle_verif",   0UL,        FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED   );
 
     /**/                 fd_topob_tile_in(  topo, "sign",   0UL,           "metric_in", "bundle_sign",    0UL,        FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   );

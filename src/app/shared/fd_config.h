@@ -11,6 +11,7 @@
 #define NAME_SZ 256
 #define AFFINITY_SZ 256
 #define CONFIGURE_STAGE_COUNT 12
+#define MAX_BLOCK_ENGINES 3
 
 union fdctl_args {
   struct {
@@ -360,6 +361,7 @@ struct fd_config {
     struct {
       int  enabled;
       char url[ 256 ];
+      char urls[ 256 ][ MAX_BLOCK_ENGINES ];
       char tls_domain_name[ 256 ];
       char tip_distribution_program_addr[ FD_BASE58_ENCODED_32_SZ ];
       char tip_payment_program_addr[ FD_BASE58_ENCODED_32_SZ ];
