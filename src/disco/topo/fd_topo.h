@@ -1,6 +1,7 @@
 #ifndef HEADER_fd_src_disco_topo_fd_topo_h
 #define HEADER_fd_src_disco_topo_fd_topo_h
 
+/*#include "../../app/shared/fd_config.h"*/
 #include "../stem/fd_stem.h"
 #include "../../tango/fd_tango.h"
 #include "../../waltz/xdp/fd_xdp1.h"
@@ -189,6 +190,7 @@ typedef struct {
 
     struct {
       char url[ 256 ];
+      ulong bundle_tile_cnt;
       char tls_domain_name[ 256 ];
       char identity_key_path[ PATH_MAX ];
     } bundle;

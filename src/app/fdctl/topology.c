@@ -386,7 +386,12 @@ fd_topo_initialize( config_t * config ) {
       tile->quic.retry                          = config->tiles.quic.retry;
 
     } else if( FD_UNLIKELY( !strcmp( tile->name, "bundle" ) ) ) {
-      strncpy( tile->bundle.url, config->tiles.bundle.url, sizeof(tile->bundle.url) );
+      strncpy( tile->bundle.url, config->tiles.bundle.urls[ tile->kind_id ], sizeof(tile->bundle.url) );
+      /*TODO: constant*/
+      for( ulong i=0; i<3;i++ ){
+        if( 0==strcmp( config->tiles.bundle.urls[ i ], "") ) break;
+        tile->bundle.bundle_tile_cnt++;
+      }
       strncpy( tile->bundle.tls_domain_name, config->tiles.bundle.tls_domain_name, sizeof(tile->bundle.tls_domain_name) );
       strncpy( tile->bundle.identity_key_path, config->consensus.identity_path, sizeof(tile->bundle.identity_key_path) );
 
