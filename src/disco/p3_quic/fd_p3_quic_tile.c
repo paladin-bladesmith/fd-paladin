@@ -185,7 +185,7 @@ before_frag( fd_quic_ctx_t * ctx,
   (void)seq;
 
   ulong proto = fd_disco_netmux_sig_proto( sig );
-  if( FD_UNLIKELY( proto!=DST_PROTO_TPU_UDP && proto!=DST_PROTO_TPU_QUIC ) ) return 1;
+  if( FD_UNLIKELY( proto!=DST_PROTO_TPU_UDP && proto!=DST_PROTO_TPU_P3_QUIC ) ) return 1;
 
   ulong hash = fd_disco_netmux_sig_hash( sig );
   if( FD_UNLIKELY( (hash % ctx->round_robin_cnt) != ctx->round_robin_id ) ) return 1;
@@ -224,7 +224,7 @@ after_frag( fd_quic_ctx_t *     ctx,
 
   ulong proto = fd_disco_netmux_sig_proto( sig );
 
-  if( FD_LIKELY( proto==DST_PROTO_TPU_QUIC ) ) {
+  if( FD_LIKELY( proto==DST_PROTO_TPU_P3_QUIC ) ) {
     if( FD_UNLIKELY( sz<sizeof(fd_eth_hdr_t) ) ) FD_LOG_ERR(( "QUIC packet too small" ));
     uchar * ip_pkt = ctx->buffer + sizeof(fd_eth_hdr_t);
     ulong   ip_sz  = sz - sizeof(fd_eth_hdr_t);

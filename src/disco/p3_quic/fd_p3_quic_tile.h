@@ -1,7 +1,7 @@
 #ifndef HEADER_fd_src_app_fdctl_run_tiles_fd_quic_tile_h
 #define HEADER_fd_src_app_fdctl_run_tiles_fd_quic_tile_h
 
-#include "fd_tpu.h"
+#include "../quic/fd_tpu.h"
 #include "../stem/fd_stem.h"
 #include "../topo/fd_topo.h"
 #include "../net/fd_net_tile.h"

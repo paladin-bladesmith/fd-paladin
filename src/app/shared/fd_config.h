@@ -312,6 +312,8 @@ struct fd_config {
       ushort regular_transaction_listen_port;
       ushort quic_transaction_listen_port;
 
+      ushort p3_quic_transaction_listen_port;
+
       uint txn_reassembly_count;
       uint max_concurrent_connections;
       uint max_concurrent_handshakes;

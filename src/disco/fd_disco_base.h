@@ -7,12 +7,13 @@
 
 #include "../util/wksp/fd_wksp_private.h"
 
-#define DST_PROTO_OUTGOING (0UL)
-#define DST_PROTO_TPU_UDP  (1UL)
-#define DST_PROTO_TPU_QUIC (2UL)
-#define DST_PROTO_SHRED    (3UL)
-#define DST_PROTO_REPAIR   (4UL)
-#define DST_PROTO_GOSSIP   (5UL)
+#define DST_PROTO_OUTGOING    (0UL)
+#define DST_PROTO_TPU_UDP     (1UL)
+#define DST_PROTO_TPU_QUIC    (2UL)
+#define DST_PROTO_SHRED       (3UL)
+#define DST_PROTO_REPAIR      (4UL)
+#define DST_PROTO_GOSSIP      (5UL)
+#define DST_PROTO_TPU_P3_QUIC (6UL)
 
 #define POH_PKT_TYPE_MICROBLOCK    (0UL)
 #define POH_PKT_TYPE_BECAME_LEADER (1UL)

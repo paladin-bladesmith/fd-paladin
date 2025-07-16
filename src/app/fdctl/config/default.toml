@@ -1041,6 +1041,9 @@ dynamic_port_range = "8900-9000"
         # transaction_listen_port.
         quic_transaction_listen_port = 9007
 
+
+        p3_quic_transaction_listen_port = 9008
+
         # Maximum number of simultaneous QUIC connections which can be
         # open.  New connections which would exceed this limit will not
         # be accepted.
