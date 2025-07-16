@@ -1171,7 +1171,8 @@ unprivileged_init( fd_topo_t *      topo,
 
   for( ulong i = 0; i < tile->out_cnt; i++ ) {
     fd_topo_link_t * out_link = &topo->links[ tile->out_link_id[ i  ] ];
-    if( strcmp( out_link->name, "net_quic" ) == 0 ) {
+    if( strcmp( out_link->name, "net_quic" )   == 0 || 
+        strcmp( out_link->name, "net_p3quic" ) == 0 ) {
       fd_topo_link_t * quic_out = out_link;
       ctx->quic_out->mcache = quic_out->mcache;
       ctx->quic_out->sync   = fd_mcache_seq_laddr( ctx->quic_out->mcache );
