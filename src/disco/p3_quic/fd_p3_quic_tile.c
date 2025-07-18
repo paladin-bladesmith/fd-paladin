@@ -469,22 +469,22 @@ unprivileged_init( fd_topo_t *      topo,
   }
 
   if( FD_UNLIKELY( tile->in_cnt==0 ) ) {
-    FD_LOG_ERR(( "quic tile has no input links" ));
+    FD_LOG_ERR(( "pquic tile has no input links" ));
   }
   if( FD_UNLIKELY( tile->in_cnt > FD_QUIC_TILE_IN_MAX ) ) {
-    FD_LOG_ERR(( "quic tile has too many input links (%lu), max %lu",
+    FD_LOG_ERR(( "pquic tile has too many input links (%lu), max %lu",
                  tile->in_cnt, FD_QUIC_TILE_IN_MAX ));
   }
 
   if( FD_UNLIKELY( tile->out_cnt!=2UL ||
-                   strcmp( topo->links[ tile->out_link_id[ 0UL ] ].name, "quic_verify" ) ||
-                   strcmp( topo->links[ tile->out_link_id[ 1UL ] ].name, "quic_net" ) ) )
-    FD_LOG_ERR(( "quic tile has none or unexpected output links %lu %s %s",
+                   strcmp( topo->links[ tile->out_link_id[ 0UL ] ].name, "pquic_verify" ) ||
+                   strcmp( topo->links[ tile->out_link_id[ 1UL ] ].name, "pquic_net" ) ) )
+    FD_LOG_ERR(( "pquic tile has none or unexpected output links %lu %s %s",
                  tile->out_cnt, topo->links[ tile->out_link_id[ 0 ] ].name, topo->links[ tile->out_link_id[ 1 ] ].name ));
 
   ulong out_depth = topo->links[ tile->out_link_id[ 0 ] ].depth;
   if( FD_UNLIKELY( tile->quic.out_depth != out_depth ) )
-    FD_LOG_ERR(( "tile->quic.out_depth (%u) does not match quic_verify link depth (%lu)",
+    FD_LOG_ERR(( "tile->quic.out_depth (%u) does not match pquic_verify link depth (%lu)",
                  tile->quic.out_depth, out_depth ));
 
   void * txn_dcache = topo->links[ tile->out_link_id[ 0UL ] ].dcache;
@@ -496,7 +496,7 @@ unprivileged_init( fd_topo_t *      topo,
 
   for( ulong i=0; i<tile->in_cnt; i++ ) {
     fd_topo_link_t * link = &topo->links[ tile->in_link_id[ i ] ];
-    if( FD_UNLIKELY( 0!=strcmp( link->name, "net_quic" ) ) ) {
+    if( FD_UNLIKELY( 0!=strcmp( link->name, "net_pquic" ) ) ) {
       FD_LOG_ERR(( "unexpected input link %s", link->name ));
     }
     fd_net_rx_bounds_init( &ctx->net_in_bounds[ i ], link->dcache );
@@ -626,8 +626,8 @@ populate_allowed_fds( fd_topo_t const *      topo,
 
 #include "../stem/fd_stem.c"
 
-fd_topo_run_tile_t fd_tile_p3_quic = {
-  .name                     = "p3_quic",
+fd_topo_run_tile_t fd_tile_pquic = {
+  .name                     = "pquic",
   .populate_allowed_seccomp = populate_allowed_seccomp,
   .populate_allowed_fds     = populate_allowed_fds,
   .scratch_align            = scratch_align,

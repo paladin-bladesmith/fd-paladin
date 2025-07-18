@@ -204,6 +204,7 @@ unprivileged_init( fd_topo_t *      topo,
     ctx->in[i].wmark  = fd_dcache_compact_wmark ( ctx->in[i].mem, link->dcache, link->mtu );
 
     if(      !strcmp( link->name, "quic_verify"  ) ) ctx->in_kind[ i ] = IN_KIND_QUIC;
+    else if(      !strcmp( link->name, "pquic_verify"  ) ) ctx->in_kind[ i ] = IN_KIND_QUIC;
     else if( !strcmp( link->name, "bundle_verif" ) ) ctx->in_kind[ i ] = IN_KIND_BUNDLE;
     else if( !strcmp( link->name, "gossip_verif" ) ) ctx->in_kind[ i ] = IN_KIND_GOSSIP;
     else if( !strcmp( link->name, "send_txns"    ) ) ctx->in_kind[ i ] = IN_KIND_SEND;
