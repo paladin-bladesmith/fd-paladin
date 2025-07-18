@@ -51,6 +51,7 @@ quic_trace_cmd_args( int *    pargc,
   args->quic_trace.dump        = fd_env_strip_cmdline_contains( pargc, pargv, "--dump" );
   args->quic_trace.dump_config = fd_env_strip_cmdline_contains( pargc, pargv, "--dump-config" );
   args->quic_trace.dump_conns  = fd_env_strip_cmdline_contains( pargc, pargv, "--dump-conns" );
+  args->quic_trace.is_p3       = fd_env_strip_cmdline_contains( pargc, pargv, "--p3" );
 }
 
 static char const *
@@ -186,7 +187,7 @@ quic_trace_cmd_fn( args_t *   args,
 
   fd_topo_tile_t * quic_tile = NULL;
   for( ulong tile_idx=0UL; tile_idx < topo->tile_cnt; tile_idx++ ) {
-    if( 0==strcmp( topo->tiles[ tile_idx ].name, "quic" ) ) {
+    if( 0==strcmp( topo->tiles[ tile_idx ].name, args->quic_trace.is_p3 ? "pquic" : "quic" ) ) {
       quic_tile = &topo->tiles[ tile_idx ];
       break;
     }
@@ -218,7 +219,7 @@ quic_trace_cmd_fn( args_t *   args,
   quic_ctx->quic  = (void *)( (ulong)quic_tile_base + (ulong)quic_ctx->quic  - ctx_raddr );
 
   /* find quic_net in topology */
-  ulong link_id = fd_topo_find_link( topo, "quic_net", 0 );
+  ulong link_id = fd_topo_find_link( topo, args->quic_trace.is_p3 ? "pquic_net" : "quic_net", 0 );
 
   if( link_id == ULONG_MAX ) {
     FD_LOG_ERR(( "quic_net not found" ));
