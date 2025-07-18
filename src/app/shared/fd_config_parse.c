@@ -171,6 +171,7 @@ fd_config_extract_pod( uchar *       pod,
 
   CFG_POP      ( ushort, tiles.quic.regular_transaction_listen_port       );
   CFG_POP      ( ushort, tiles.quic.quic_transaction_listen_port          );
+  CFG_POP      ( ushort, tiles.quic.p3_quic_transaction_listen_port          );
   CFG_POP      ( uint,   tiles.quic.txn_reassembly_count                  );
   CFG_POP      ( uint,   tiles.quic.max_concurrent_connections            );
   CFG_POP      ( uint,   tiles.quic.max_concurrent_handshakes             );
