@@ -1,4 +1,4 @@
 [submodule "agave"]
 	path = agave
-	url = https://github.com/paladin-bladesmith/fd-agave
+	url = git@github.com:paladin-bladesmith/fd-agave
 	branch = fd_v0.606.20216
