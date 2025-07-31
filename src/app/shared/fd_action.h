@@ -84,6 +84,7 @@ union fdctl_args {
   } load; /* also used by bench */
 
   struct {
+    int is_p3; /* Only for debug purposes to switch between quic and pquic */
     int event;
     int dump; /* whether the user requested --dump */
     int dump_config; /* whether the user requested to dump the quic config */

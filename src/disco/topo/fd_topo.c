@@ -203,6 +203,7 @@ fd_topo_tile_extra_normal_pages( fd_topo_tile_t const * tile ) {
                    !strcmp( tile->name, "shred"  ) ||
                    !strcmp( tile->name, "poh"    ) ||
                    !strcmp( tile->name, "quic"   ) ||
+                   !strcmp( tile->name, "pquic"   ) ||
 
                    !strcmp( tile->name, "gossip" ) ||
                    !strcmp( tile->name, "repair" ) ||

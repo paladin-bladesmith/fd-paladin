@@ -197,6 +197,7 @@ typedef struct {
   uint   bind_address;
   ushort shred_listen_port;
   ushort quic_transaction_listen_port;
+  ushort p3_quic_transaction_listen_port;
   ushort legacy_transaction_listen_port;
   ushort gossip_listen_port;
   ushort repair_intake_listen_port;
@@ -206,6 +207,7 @@ typedef struct {
   fd_net_in_ctx_t in[ MAX_NET_INS ];
 
   fd_net_out_ctx_t quic_out[1];
+  fd_net_out_ctx_t pquic_out[1];
   fd_net_out_ctx_t shred_out[1];
   fd_net_out_ctx_t gossip_out[1];
   fd_net_out_ctx_t repair_out[1];
@@ -736,6 +738,9 @@ net_rx_packet( fd_net_ctx_t *      ctx,
   if(      FD_UNLIKELY( udp_dstport==ctx->shred_listen_port ) ) {
     proto = DST_PROTO_SHRED;
     out = ctx->shred_out;
+  } else if( FD_UNLIKELY( udp_dstport==ctx->p3_quic_transaction_listen_port ) ) {
+    proto = DST_PROTO_TPU_P3_QUIC;
+    out = ctx->pquic_out;
   } else if( FD_UNLIKELY( udp_dstport==ctx->quic_transaction_listen_port ) ) {
     proto = DST_PROTO_TPU_QUIC;
     out = ctx->quic_out;
@@ -756,11 +761,12 @@ net_rx_packet( fd_net_ctx_t *      ctx,
 
     FD_LOG_ERR(( "Firedancer received a UDP packet on port %hu which was not expected. "
                   "Only the following ports should be configured to forward packets: "
-                  "%hu, %hu, %hu, %hu, %hu, %hu (excluding any 0 ports, which can be ignored)."
+                  "%hu, %hu, %hu, %hu, %hu, %hu, %hu (excluding any 0 ports, which can be ignored)."
                   "Please report this error to Firedancer maintainers.",
                   udp_dstport,
                   ctx->shred_listen_port,
                   ctx->quic_transaction_listen_port,
+                  ctx->p3_quic_transaction_listen_port,
                   ctx->legacy_transaction_listen_port,
                   ctx->gossip_listen_port,
                   ctx->repair_intake_listen_port,
@@ -1097,6 +1103,7 @@ privileged_init( fd_topo_t *      topo,
       (ushort)tile->net.gossip_listen_port,
       (ushort)tile->net.repair_intake_listen_port,
       (ushort)tile->net.repair_serve_listen_port,
+      (ushort)tile->net.p3_quic_transaction_listen_port,
     };
 
     uint lo_idx = if_nametoindex( "lo" );
@@ -1139,13 +1146,14 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->net_tile_id  = (uint)tile->kind_id;
   ctx->net_tile_cnt = (uint)fd_topo_tile_name_cnt( topo, tile->name );
 
-  ctx->bind_address                   = tile->net.bind_address;
-  ctx->shred_listen_port              = tile->net.shred_listen_port;
-  ctx->quic_transaction_listen_port   = tile->net.quic_transaction_listen_port;
-  ctx->legacy_transaction_listen_port = tile->net.legacy_transaction_listen_port;
-  ctx->gossip_listen_port             = tile->net.gossip_listen_port;
-  ctx->repair_intake_listen_port      = tile->net.repair_intake_listen_port;
-  ctx->repair_serve_listen_port       = tile->net.repair_serve_listen_port;
+  ctx->bind_address                    = tile->net.bind_address;
+  ctx->shred_listen_port               = tile->net.shred_listen_port;
+  ctx->p3_quic_transaction_listen_port = tile->net.p3_quic_transaction_listen_port;
+  ctx->quic_transaction_listen_port    = tile->net.quic_transaction_listen_port;
+  ctx->legacy_transaction_listen_port  = tile->net.legacy_transaction_listen_port;
+  ctx->gossip_listen_port              = tile->net.gossip_listen_port;
+  ctx->repair_intake_listen_port       = tile->net.repair_intake_listen_port;
+  ctx->repair_serve_listen_port        = tile->net.repair_serve_listen_port;
 
   /* Put a bound on chunks we read from the input, to make sure they
      are within in the data region of the workspace. */
@@ -1170,6 +1178,12 @@ unprivileged_init( fd_topo_t *      topo,
       ctx->quic_out->sync   = fd_mcache_seq_laddr( ctx->quic_out->mcache );
       ctx->quic_out->depth  = fd_mcache_depth( ctx->quic_out->mcache );
       ctx->quic_out->seq    = fd_mcache_seq_query( ctx->quic_out->sync );
+    } else if ( strcmp( out_link->name, "net_pquic" ) == 0 ) {
+      fd_topo_link_t * pquic_out = out_link;
+      ctx->pquic_out->mcache = pquic_out->mcache;
+      ctx->pquic_out->sync   = fd_mcache_seq_laddr( ctx->pquic_out->mcache );
+      ctx->pquic_out->depth  = fd_mcache_depth( ctx->pquic_out->mcache );
+      ctx->pquic_out->seq    = fd_mcache_seq_query( ctx->pquic_out->sync );
     } else if( strcmp( out_link->name, "net_shred" ) == 0 ) {
       fd_topo_link_t * shred_out = out_link;
       ctx->shred_out->mcache = shred_out->mcache;
@@ -1203,6 +1217,8 @@ unprivileged_init( fd_topo_t *      topo,
     FD_LOG_ERR(( "shred listen port set but no out link was found" ));
   } else if( FD_UNLIKELY( ctx->quic_transaction_listen_port!=0 && ctx->quic_out->mcache==NULL ) ) {
     FD_LOG_ERR(( "quic transaction listen port set but no out link was found" ));
+  } else if( FD_UNLIKELY( ctx->p3_quic_transaction_listen_port!=0 && ctx->pquic_out->mcache==NULL ) ) {
+    FD_LOG_ERR(( "p3 quic transaction listen port set but no out link was found" ));
   } else if( FD_UNLIKELY( ctx->legacy_transaction_listen_port!=0 && ctx->quic_out->mcache==NULL ) ) {
     FD_LOG_ERR(( "legacy transaction listen port set but no out link was found" ));
   } else if( FD_UNLIKELY( ctx->gossip_listen_port!=0 && ctx->gossip_out->mcache==NULL ) ) {

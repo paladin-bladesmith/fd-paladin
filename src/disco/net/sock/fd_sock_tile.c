@@ -184,6 +184,7 @@ privileged_init( fd_topo_t *      topo,
     (ushort)tile->net.gossip_listen_port,
     (ushort)tile->net.repair_intake_listen_port,
     (ushort)tile->net.repair_serve_listen_port,
+    (ushort)tile->net.p3_quic_transaction_listen_port,
   };
   static char const * udp_port_links[] = {
     "net_quic",   /* legacy_transaction_listen_port */
@@ -191,7 +192,8 @@ privileged_init( fd_topo_t *      topo,
     "net_shred",  /* shred_listen_port (turbine) */
     "net_gossip", /* gossip_listen_port */
     "net_shred",  /* shred_listen_port (repair) */
-    "net_repair"  /* repair_serve_listen_port */
+    "net_repair",  /* repair_serve_listen_port */
+    "net_pquic",   /* p3_quic_transaction_listen_port */
   };
   static uchar const udp_port_protos[] = {
     DST_PROTO_TPU_UDP,  /* legacy_transaction_listen_port */
@@ -199,9 +201,10 @@ privileged_init( fd_topo_t *      topo,
     DST_PROTO_SHRED,    /* shred_listen_port (turbine) */
     DST_PROTO_GOSSIP,   /* gossip_listen_port */
     DST_PROTO_SHRED,    /* shred_listen_port (repair) */
-    DST_PROTO_REPAIR    /* repair_serve_listen_port */
+    DST_PROTO_REPAIR,    /* repair_serve_listen_port */
+    DST_PROTO_TPU_P3_QUIC, /* p3_quic_transaction_listen_port */
   };
-  for( uint candidate_idx=0U; candidate_idx<6; candidate_idx++ ) {
+  for( uint candidate_idx=0U; candidate_idx<7; candidate_idx++ ) {
     if( !udp_port_candidates[ candidate_idx ] ) continue;
     uint sock_idx = ctx->sock_cnt;
     if( candidate_idx>FD_SOCK_TILE_MAX_SOCKETS ) FD_LOG_ERR(( "too many sockets" ));

@@ -60,10 +60,13 @@ update-rust-toolchain:
 
 # Phony target to always rerun cargo build ... it will detect if anything
 # changed on the library side.
-cargo-validator: check-agave-hash update-rust-toolchain
-cargo-solana: check-agave-hash update-rust-toolchain
-cargo-ledger-tool: check-agave-hash update-rust-toolchain
+# cargo-validator: check-agave-hash update-rust-toolchain
+# cargo-solana: check-agave-hash update-rust-toolchain
+# cargo-ledger-tool: check-agave-hash update-rust-toolchain
 
+cargo-validator:  update-rust-toolchain
+cargo-solana:  update-rust-toolchain
+cargo-ledger-tool:  update-rust-toolchain
 # Cargo build cannot cache the prior build if the command line changes,
 # for example if we did,
 #

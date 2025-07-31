@@ -26,45 +26,50 @@ fd_topo_initialize( config_t * config ) {
   topo->gigantic_page_threshold = config->hugetlbfs.gigantic_page_threshold_mib << 20;
 
   /*             topo, name */
-  fd_topob_wksp( topo, "metric_in"    );
-  fd_topob_wksp( topo, "net_quic"     );
-  fd_topob_wksp( topo, "net_shred"    );
-  fd_topob_wksp( topo, "quic_verify"  );
-  fd_topob_wksp( topo, "verify_dedup" );
-  fd_topob_wksp( topo, "dedup_resolv" );
-  fd_topob_wksp( topo, "resolv_pack"  );
-  fd_topob_wksp( topo, "pack_bank"    );
-  fd_topob_wksp( topo, "bank_pack"    );
-  fd_topob_wksp( topo, "bank_poh"     );
-  fd_topob_wksp( topo, "bank_busy"    );
-  fd_topob_wksp( topo, "poh_shred"    );
-  fd_topob_wksp( topo, "gossip_dedup" );
-  fd_topob_wksp( topo, "shred_store"  );
-  fd_topob_wksp( topo, "stake_out"    );
-  fd_topob_wksp( topo, "executed_txn" );
+  fd_topob_wksp( topo, "metric_in"     );
+  fd_topob_wksp( topo, "net_quic"      );
+  fd_topob_wksp( topo, "net_pquic"     );
+  fd_topob_wksp( topo, "net_shred"     );
+  fd_topob_wksp( topo, "quic_verify"   );
+  fd_topob_wksp( topo, "pquic_verify"  );
+  fd_topob_wksp( topo, "verify_dedup"  );
+  fd_topob_wksp( topo, "dedup_resolv"  );
+  fd_topob_wksp( topo, "resolv_pack"   );
+  fd_topob_wksp( topo, "pack_bank"     );
+  fd_topob_wksp( topo, "bank_pack"     );
+  fd_topob_wksp( topo, "bank_poh"      );
+  fd_topob_wksp( topo, "bank_busy"     );
+  fd_topob_wksp( topo, "poh_shred"     );
+  fd_topob_wksp( topo, "gossip_dedup"  );
+  fd_topob_wksp( topo, "shred_store"   );
+  fd_topob_wksp( topo, "stake_out"     );
+  fd_topob_wksp( topo, "executed_txn"  );
 
-  fd_topob_wksp( topo, "shred_sign"   );
-  fd_topob_wksp( topo, "sign_shred"   );
+  fd_topob_wksp( topo, "shred_sign"    );
+  fd_topob_wksp( topo, "sign_shred"    );
 
-  fd_topob_wksp( topo, "quic"         );
-  fd_topob_wksp( topo, "verify"       );
-  fd_topob_wksp( topo, "dedup"        );
-  fd_topob_wksp( topo, "resolv"       );
-  fd_topob_wksp( topo, "pack"         );
-  fd_topob_wksp( topo, "bank"         );
-  fd_topob_wksp( topo, "poh"          );
-  fd_topob_wksp( topo, "shred"        );
-  fd_topob_wksp( topo, "store"        );
-  fd_topob_wksp( topo, "sign"         );
-  fd_topob_wksp( topo, "metric"       );
-  fd_topob_wksp( topo, "cswtch"       );
+  fd_topob_wksp( topo, "quic"          );
+  fd_topob_wksp( topo, "pquic"         );
+  fd_topob_wksp( topo, "verify"        );
+  fd_topob_wksp( topo, "dedup"         );
+  fd_topob_wksp( topo, "resolv"        );
+  fd_topob_wksp( topo, "pack"          );
+  fd_topob_wksp( topo, "bank"          );
+  fd_topob_wksp( topo, "poh"           );
+  fd_topob_wksp( topo, "shred"         );
+  fd_topob_wksp( topo, "store"         );
+  fd_topob_wksp( topo, "sign"          );
+  fd_topob_wksp( topo, "metric"        );
+  fd_topob_wksp( topo, "cswtch"        );
 
   #define FOR(cnt) for( ulong i=0UL; i<cnt; i++ )
 
   /*                                  topo, link_name,      wksp_name,      depth,                                    mtu,                    burst */
   FOR(quic_tile_cnt)   fd_topob_link( topo, "quic_net",     "net_quic",     config->net.ingress_buffer_size,          FD_NET_MTU,             1UL );
+                       fd_topob_link( topo, "pquic_net",   "net_pquic",   config->net.ingress_buffer_size,          FD_NET_MTU,             1UL );
   FOR(shred_tile_cnt)  fd_topob_link( topo, "shred_net",    "net_shred",    32768UL,                                  FD_NET_MTU,             1UL );
   FOR(quic_tile_cnt)   fd_topob_link( topo, "quic_verify",  "quic_verify",  config->tiles.verify.receive_buffer_size, FD_TPU_REASM_MTU,       config->tiles.quic.txn_reassembly_count );
+                       fd_topob_link( topo, "pquic_verify",  "pquic_verify",  config->tiles.verify.receive_buffer_size, FD_TPU_REASM_MTU,       config->tiles.quic.txn_reassembly_count );
   FOR(verify_tile_cnt) fd_topob_link( topo, "verify_dedup", "verify_dedup", config->tiles.verify.receive_buffer_size, FD_TPU_PARSED_MTU,      1UL );
   /**/                 fd_topob_link( topo, "gossip_dedup", "gossip_dedup", 2048UL,                                   FD_TPU_MTU,             1UL );
   /* dedup_pack is large currently because pack can encounter stalls when running at very high throughput rates that would
@@ -118,10 +123,12 @@ fd_topo_initialize( config_t * config ) {
   fd_topos_net_tiles( topo, config->layout.net_tile_count, &config->net, config->tiles.netlink.max_routes, config->tiles.netlink.max_neighbors, tile_to_cpu );
 
   FOR(net_tile_cnt) fd_topos_net_rx_link( topo, "net_quic",  i, config->net.ingress_buffer_size );
+  FOR(net_tile_cnt) fd_topos_net_rx_link( topo, "net_pquic",  i, config->net.ingress_buffer_size );
   FOR(net_tile_cnt) fd_topos_net_rx_link( topo, "net_shred", i, config->net.ingress_buffer_size );
 
   /*                                  topo, tile_name, tile_wksp, metrics_wksp, cpu_idx,                       is_agave, uses_keyswitch */
   FOR(quic_tile_cnt)   fd_topob_tile( topo, "quic",    "quic",    "metric_in",  tile_to_cpu[ topo->tile_cnt ], 0,        0 );
+                       fd_topob_tile( topo, "pquic",  "pquic",  "metric_in",  tile_to_cpu[ topo->tile_cnt ], 0,        0 );
   FOR(verify_tile_cnt) fd_topob_tile( topo, "verify",  "verify",  "metric_in",  tile_to_cpu[ topo->tile_cnt ], 0,        0 );
   /**/                 fd_topob_tile( topo, "dedup",   "dedup",   "metric_in",  tile_to_cpu[ topo->tile_cnt ], 0,        0 );
   FOR(resolv_tile_cnt) fd_topob_tile( topo, "resolv",  "resolv",  "metric_in",  tile_to_cpu[ topo->tile_cnt ], 1,        0 );
@@ -137,6 +144,9 @@ fd_topo_initialize( config_t * config ) {
   /*                                      topo, tile_name, tile_kind_id, fseq_wksp,   link_name,      link_kind_id, reliable,            polled */
   for( ulong j=0UL; j<quic_tile_cnt; j++ )
                    fd_topos_tile_in_net(  topo,                          "metric_in", "quic_net",     j,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED ); /* No reliable consumers of networking fragments, may be dropped or overrun */
+
+  /**/        fd_topos_tile_in_net(  topo,                          "metric_in", "pquic_net",   0,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED ); /* No reliable consumers of networking fragments, may be dropped or overrun */
+
   for( ulong j=0UL; j<shred_tile_cnt; j++ )
                    fd_topos_tile_in_net(  topo,                          "metric_in", "shred_net",    j,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED ); /* No reliable consumers of networking fragments, may be dropped or overrun */
 
@@ -144,10 +154,19 @@ fd_topo_initialize( config_t * config ) {
                        fd_topob_tile_in(  topo, "quic",    i,            "metric_in", "net_quic",     j,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED ); /* No reliable consumers of networking fragments, may be dropped or overrun */
   FOR(quic_tile_cnt)   fd_topob_tile_out( topo, "quic",    i,                         "quic_verify",  i                                                  );
   FOR(quic_tile_cnt)   fd_topob_tile_out( topo, "quic",    i,                         "quic_net",     i                                                  );
+
+  FOR(net_tile_cnt)    fd_topob_tile_in( topo,  "pquic",   0,            "metric_in", "net_pquic",  i,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED );  /* No reliable consumers of networking fragments, may be dropped or overrun */
+  /**/                 fd_topob_tile_out( topo, "pquic",   0,                         "pquic_verify",  0                                                  );
+  /**/                 fd_topob_tile_out( topo, "pquic",   0,                         "pquic_net",     0                                                  );
+
+
+
   /* All verify tiles read from all QUIC tiles, packets are round robin. */
   FOR(verify_tile_cnt) for( ulong j=0UL; j<quic_tile_cnt; j++ )
                        fd_topob_tile_in(  topo, "verify",  i,            "metric_in", "quic_verify",  j,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED ); /* No reliable consumers, verify tiles may be overrun */
+  FOR(verify_tile_cnt) fd_topob_tile_in(  topo, "verify",  i,            "metric_in", "pquic_verify", 0,           FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED ); /* No reliable consumers, verify tiles may be overrun */
   FOR(verify_tile_cnt) fd_topob_tile_out( topo, "verify",  i,                         "verify_dedup", i                                                  );
+
   /* Declare the single gossip link before the variable length verify-dedup links so we could have a compile-time index to the gossip link. */
   /**/                 fd_topob_tile_in(  topo, "dedup",   0UL,          "metric_in", "gossip_dedup", 0UL,          FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED );
   FOR(verify_tile_cnt) fd_topob_tile_in(  topo, "dedup",   0UL,          "metric_in", "verify_dedup", i,            FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED );
@@ -363,9 +382,10 @@ fd_topo_initialize( config_t * config ) {
 
     if( FD_UNLIKELY( !strcmp( tile->name, "net" ) || !strcmp( tile->name, "sock" ) ) ) {
 
-      tile->net.shred_listen_port              = config->tiles.shred.shred_listen_port;
-      tile->net.quic_transaction_listen_port   = config->tiles.quic.quic_transaction_listen_port;
-      tile->net.legacy_transaction_listen_port = config->tiles.quic.regular_transaction_listen_port;
+      tile->net.shred_listen_port               = config->tiles.shred.shred_listen_port;
+      tile->net.quic_transaction_listen_port    = config->tiles.quic.quic_transaction_listen_port;
+      tile->net.legacy_transaction_listen_port  = config->tiles.quic.regular_transaction_listen_port;
+      tile->net.p3_quic_transaction_listen_port = config->tiles.quic.p3_quic_transaction_listen_port;
 
     } else if( FD_UNLIKELY( !strcmp( tile->name, "netlnk" ) ) ) {
 
@@ -378,6 +398,17 @@ fd_topo_initialize( config_t * config ) {
       tile->quic.max_concurrent_connections     = config->tiles.quic.max_concurrent_connections;
       tile->quic.max_concurrent_handshakes      = config->tiles.quic.max_concurrent_handshakes;
       tile->quic.quic_transaction_listen_port   = config->tiles.quic.quic_transaction_listen_port;
+      tile->quic.idle_timeout_millis            = config->tiles.quic.idle_timeout_millis;
+      tile->quic.ack_delay_millis               = config->tiles.quic.ack_delay_millis;
+      tile->quic.retry                          = config->tiles.quic.retry;
+
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "pquic" ) ) ) {
+
+      tile->quic.reasm_cnt                      = config->tiles.quic.txn_reassembly_count;
+      tile->quic.out_depth                      = config->tiles.verify.receive_buffer_size;
+      tile->quic.max_concurrent_connections     = config->tiles.quic.max_concurrent_connections;
+      tile->quic.max_concurrent_handshakes      = config->tiles.quic.max_concurrent_handshakes;
+      tile->quic.quic_transaction_listen_port   = config->tiles.quic.p3_quic_transaction_listen_port; 
       tile->quic.idle_timeout_millis            = config->tiles.quic.idle_timeout_millis;
       tile->quic.ack_delay_millis               = config->tiles.quic.ack_delay_millis;
       tile->quic.retry                          = config->tiles.quic.retry;
