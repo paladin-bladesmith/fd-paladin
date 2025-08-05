@@ -359,14 +359,15 @@ struct fd_config {
     } dedup;
 
     struct {
-      int  enabled;
-      char url[ 256 ];
-      char urls[ 256 ][ MAX_BLOCK_ENGINES ];
-      char tls_domain_name[ 256 ];
-      char tip_distribution_program_addr[ FD_BASE58_ENCODED_32_SZ ];
-      char tip_payment_program_addr[ FD_BASE58_ENCODED_32_SZ ];
-      char tip_distribution_authority[ FD_BASE58_ENCODED_32_SZ ];
-      uint commission_bps;
+      int   enabled;
+      char  url[ 256 ];
+      ulong urls_cnt;
+      char  urls[ MAX_BLOCK_ENGINES ][ 256 ];
+      char  tls_domain_name[ 256 ];
+      char  tip_distribution_program_addr[ FD_BASE58_ENCODED_32_SZ ];
+      char  tip_payment_program_addr[ FD_BASE58_ENCODED_32_SZ ];
+      char  tip_distribution_authority[ FD_BASE58_ENCODED_32_SZ ];
+      uint  commission_bps;
     } bundle;
 
     struct {

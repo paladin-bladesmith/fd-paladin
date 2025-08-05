@@ -258,8 +258,12 @@ fd_topo_initialize( config_t * config ) {
     fd_topob_wksp( topo, "bundle"       );
 
     ulong bundle_tile_cnt = 1;
+    /*TODO: Backwards compatibility, remove url later for urls.*/
+    if( FD_LIKELY( 0==strcmp( config->tiles.bundle.url, config->tiles.bundle.urls[ 0 ] ) ) ){
+      bundle_tile_cnt = 0;
+    }
     for( ulong i = 0; i<MAX_BLOCK_ENGINES; i++ ){
-      if( 0==strcmp( config->tiles.bundle.urls[ i ], "" ) ) break;
+      if( FD_UNLIKELY( 0==strcmp( config->tiles.bundle.urls[ i ], "" ) ) ) break;
       bundle_tile_cnt++;
     }
 
@@ -271,19 +275,19 @@ fd_topo_initialize( config_t * config ) {
 
     FOR(bundle_tile_cnt) fd_topob_tile( topo, "bundle",  "bundle",  "metric_in", tile_to_cpu[ topo->tile_cnt ], 0, 1 );
 
-    FOR(bundle_tile_cnt) fd_topob_tile_out( topo, "bundle", i, "bundle_verif", 0 );
+    FOR(bundle_tile_cnt) fd_topob_tile_out( topo, "bundle", i, "bundle_verif", i );
     FOR(verify_tile_cnt) for( ulong j=0; j<bundle_tile_cnt; j++ )
-                         fd_topob_tile_in(  topo, "verify", i,             "metric_in", "bundle_verif", j,        FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED   );
+                         fd_topob_tile_in(  topo, "verify", i,             "metric_in",  "bundle_verif",   j,       FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED   );
 
-    FOR(bundle_tile_cnt) fd_topob_tile_in(  topo, "sign",   0UL,           "metric_in", "bundle_sign",    i,        FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   );
-    FOR(bundle_tile_cnt) fd_topob_tile_out( topo, "bundle", i,                        "bundle_sign",    0UL                                                );
-    FOR(bundle_tile_cnt) fd_topob_tile_in(  topo, "bundle", i,           "metric_in", "sign_bundle",    0UL,        FD_TOPOB_UNRELIABLE, FD_TOPOB_UNPOLLED );
-    FOR(bundle_tile_cnt) fd_topob_tile_out( topo, "sign",   0UL,                        "sign_bundle",    i                                                );
+    FOR(bundle_tile_cnt) fd_topob_tile_in(  topo, "sign",   0UL,           "metric_in",  "bundle_sign",    i,       FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   );
+    FOR(bundle_tile_cnt) fd_topob_tile_out( topo, "bundle", i,                           "bundle_sign",    i                                               );
+    FOR(bundle_tile_cnt) fd_topob_tile_in(  topo, "bundle", i,             "metric_in",  "sign_bundle",    i,       FD_TOPOB_UNRELIABLE, FD_TOPOB_UNPOLLED );
+    FOR(bundle_tile_cnt) fd_topob_tile_out( topo, "sign",   0UL,                         "sign_bundle",    i                                               );
 
-    /**/                 fd_topob_tile_in(  topo, "sign",   0UL,           "metric_in", "pack_sign",      0UL,        FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   );
-    /**/                 fd_topob_tile_out( topo, "pack",   0UL,                        "pack_sign",      0UL                                                );
-    /**/                 fd_topob_tile_in(  topo, "pack",   0UL,           "metric_in", "sign_pack",      0UL,        FD_TOPOB_UNRELIABLE, FD_TOPOB_UNPOLLED );
-    /**/                 fd_topob_tile_out( topo, "sign",   0UL,                        "sign_pack",      0UL                                                );
+    /**/                 fd_topob_tile_in(  topo, "sign",   0UL,           "metric_in",  "pack_sign",      0UL,     FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   );
+    /**/                 fd_topob_tile_out( topo, "pack",   0UL,                         "pack_sign",      0UL                                             );
+    /**/                 fd_topob_tile_in(  topo, "pack",   0UL,           "metric_in",  "sign_pack",      0UL,     FD_TOPOB_UNRELIABLE, FD_TOPOB_UNPOLLED );
+    /**/                 fd_topob_tile_out( topo, "sign",   0UL,                         "sign_pack",      0UL                                             );
 
     if( plugins_enabled ) {
       fd_topob_wksp( topo, "bundle_plugi" );
