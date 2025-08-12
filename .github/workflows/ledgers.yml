@@ -76,7 +76,7 @@ jobs:
       - name: find OBJDIR
         run: |
           echo OBJDIR=$(make help | grep OBJDIR | awk '{print $4}') >> $GITHUB_ENV
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: cov
           pattern: ledger-cov-${{ github.run_id }}-*
