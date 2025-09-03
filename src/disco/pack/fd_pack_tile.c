@@ -589,9 +589,8 @@ after_credit( fd_pack_ctx_t *     ctx,
   /* Have I sent the max allowed microblocks? Nothing to do. */
   if( FD_UNLIKELY( ctx->slot_microblock_cnt>=ctx->slot_max_microblocks ) ) return;
 
-  /* Do I have enough transactions and/or have I waited enough time? */
-  if( FD_UNLIKELY( (ulong)(now-ctx->last_successful_insert) <
-        ctx->wait_duration_ticks[ fd_ulong_min( fd_pack_avail_txn_cnt( ctx->pack ), MAX_TXN_PER_MICROBLOCK ) ] ) ) {
+  /* Have I waited for atleast 50 ms or until I have MAX_TXN_PER_MICROBLOCK? */
+  if( FD_UNLIKELY( ((ulong)(now-ctx->last_successful_insert) < 50000000L) || fd_pack_avail_txn_cnt( ctx->pack ) >= MAX_TXN_PER_MICROBLOCK ) ) {
     update_metric_state( ctx, now, FD_PACK_METRIC_STATE_TRANSACTIONS, 0 );
     return;
   }
@@ -691,15 +690,15 @@ after_credit( fd_pack_ctx_t *     ctx,
         flags = FD_PACK_SCHEDULE_VOTE | fd_int_if( i==0,              FD_PACK_SCHEDULE_BUNDLE, 0 )
                                       | fd_int_if( i<pacing_bank_cnt, FD_PACK_SCHEDULE_TXN,    0 );
         break;
-      case FD_PACK_STRATEGY_BUNDLE:
-        flags = FD_PACK_SCHEDULE_VOTE | FD_PACK_SCHEDULE_BUNDLE
-                                      | fd_int_if( ctx->slot_end_ns - ctx->approx_wallclock_ns<50000000L, FD_PACK_SCHEDULE_TXN,  0 );
-        break;
+      /*case FD_PACK_STRATEGY_BUNDLE:*/
+      /*  flags = FD_PACK_SCHEDULE_VOTE | FD_PACK_SCHEDULE_BUNDLE*/
+      /*                                | fd_int_if( ctx->slot_end_ns - ctx->approx_wallclock_ns<50000000L, FD_PACK_SCHEDULE_TXN,  0 );*/
+      /*  break;*/
     }
 
     fd_txn_p_t * microblock_dst = fd_chunk_to_laddr( ctx->bank_out_mem, ctx->bank_out_chunk );
     long schedule_duration = -fd_tickcount();
-    ulong schedule_cnt = fd_pack_schedule_next_microblock( ctx->pack, CUS_PER_MICROBLOCK, VOTE_FRACTION, (ulong)i, flags, microblock_dst );
+    ulong schedule_cnt = fd_pack_schedule_next_microblock_universal( ctx->pack, CUS_PER_MICROBLOCK, VOTE_FRACTION, (ulong)i, flags, microblock_dst );
     schedule_duration      += fd_tickcount();
     fd_histf_sample( (schedule_cnt>0UL) ? ctx->schedule_duration : ctx->no_sched_duration, (ulong)schedule_duration );
 

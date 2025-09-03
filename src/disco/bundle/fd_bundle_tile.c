@@ -129,6 +129,7 @@ fd_bundle_tile_publish_block_engine_update(
       0UL, /* seq */
       tspub
   );
+  FD_LOG_WARNING(( "Bundle Received Here"));
   ctx->plugin_out.chunk = fd_dcache_compact_next( ctx->plugin_out.chunk, sizeof(fd_plugin_msg_block_engine_update_t), ctx->plugin_out.chunk0, ctx->plugin_out.wmark );
 }
 
@@ -506,9 +507,6 @@ static void
 unprivileged_init( fd_topo_t *      topo,
                    fd_topo_tile_t * tile ) {
   fd_bundle_tile_t * ctx = fd_topo_obj_laddr( topo, tile->tile_obj_id );
-  if( FD_UNLIKELY( tile->kind_id!=0 ) ) {
-    FD_LOG_ERR(( "There can only be one bundle tile" ));
-  }
 
   ulong sign_in_idx = fd_topo_find_tile_in_link( topo, tile, "sign_bundle", tile->kind_id );
   if( FD_UNLIKELY( sign_in_idx==ULONG_MAX ) ) FD_LOG_ERR(( "Missing sign_bundle link" ));
