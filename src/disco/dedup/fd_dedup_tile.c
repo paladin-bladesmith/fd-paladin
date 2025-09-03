@@ -165,6 +165,7 @@ after_frag( fd_dedup_ctx_t *    ctx,
   }
 
   if( FD_UNLIKELY( txnm->block_engine.bundle_id && ctx->bundle_failed ) ) {
+    FD_LOG_WARNING(( "MBE bundle_id %lu failed", txnm->block_engine.bundle_id ));
     ctx->metrics.bundle_peer_failure_cnt++;
     return;
   }
@@ -195,6 +196,7 @@ after_frag( fd_dedup_ctx_t *    ctx,
 
     for( ulong i=0UL; i<ctx->bundle_idx; i++ ) {
       if( !memcmp( ctx->bundle_signatures[ i ], fd_txn_m_payload( txnm )+txn->signature_off, 64UL ) ) {
+        FD_LOG_WARNING(( "MBE bundle_id %lu found duplicate txn %s", txnm->block_engine.bundle_id, FD_BASE58_ENC_64_ALLOCA( fd_txn_m_payload( txnm )+txn->signature_off ) ));
         is_dup = 1;
         break;
       }

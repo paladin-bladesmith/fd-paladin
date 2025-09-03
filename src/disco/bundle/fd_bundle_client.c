@@ -13,6 +13,8 @@
 #include "../../ballet/base58/fd_base58.h"
 #include "../../ballet/nanopb/pb_decode.h"
 #include "../../util/net/fd_ip4.h"
+#include "../../flamenco/fd_flamenco_base.h"
+#include "../../ballet/base64/fd_base64.h"
 
 #include <fcntl.h>
 #include <errno.h>
@@ -24,6 +26,41 @@
 #include <netinet/tcp.h>
 
 #define FD_BUNDLE_CLIENT_REQUEST_TIMEOUT ((long)8e9) /* 8 seconds */
+static const uchar EMPTY_KEY[ 45 ] = { 0 };
+static const uchar COM_KEY[ 32 ] = { 
+  69,
+  30,
+  61,
+  213,
+  13,
+  59,
+  123,
+  133,
+  54,
+  4,
+  92,
+  43,
+  122,
+  194,
+  236,
+  37,
+  148,
+  115,
+  235,
+  194,
+  90,
+  227,
+  188,
+  190,
+  31,
+  190,
+  177,
+  125,
+  82,
+  251,
+  199,
+  190
+};
 
 __attribute__((weak)) long
 fd_bundle_now( void ) {
@@ -451,6 +488,8 @@ fd_bundle_tile_publish_bundle_txn(
 ) {
   if( FD_UNLIKELY( !ctx->builder_info_avail ) ) {
     ctx->metrics.missing_builder_info_fail_cnt++; /* unreachable */
+
+    FD_LOG_WARNING(( "MBE server: " FD_IP4_ADDR_FMT " missing builder info", FD_IP4_ADDR_FMT_ARGS( ctx->server_ip4_addr ) ));
     return;
   }
 
@@ -467,7 +506,15 @@ fd_bundle_tile_publish_bundle_txn(
       .commission     = (uchar)ctx->builder_commission
     },
   };
-  memcpy( txnm->block_engine.commission_pubkey, ctx->builder_pubkey, 32UL );
+  if( FD_UNLIKELY( !fd_memeq( ctx->builder_pubkey, EMPTY_KEY , 32 ) ) ){
+    memcpy( txnm->block_engine.commission_pubkey, ctx->builder_pubkey, 32UL );
+    FD_LOG_WARNING(( "Setting BE commission_pubkey to: %s",  FD_BASE58_ENC_32_ALLOCA( ctx->builder_pubkey ))); 
+    FD_LOG_WARNING(( "builder pubkey does not match default: %i ", !fd_memeq( ctx->builder_pubkey, EMPTY_KEY, 32 ) ));
+  } else {
+    memcpy( txnm->block_engine.commission_pubkey, COM_KEY, 32);
+
+    FD_LOG_WARNING(( "Setting fallback commission_pubkey to: %s",  FD_BASE58_ENC_32_ALLOCA( COM_KEY ))); 
+  }
   fd_memcpy( fd_txn_m_payload( txnm ), txn, txn_sz );
 
   ulong sz  = fd_txn_m_realized_footprint( txnm, 0, 0 );
@@ -481,6 +528,10 @@ fd_bundle_tile_publish_bundle_txn(
   fd_stem_publish( ctx->stem, ctx->verify_out.idx, sig, ctx->verify_out.chunk, sz, 0UL, 0UL, tspub );
   ctx->verify_out.chunk = fd_dcache_compact_next( ctx->verify_out.chunk, sz, ctx->verify_out.chunk0, ctx->verify_out.wmark );
   ctx->metrics.txn_received_cnt++;
+  /*fd_txn_t * txn_t = fd_txn_m_txn_t( txnm );*/
+  char msg_b[ FD_BASE64_ENC_SZ( 1232 ) ];
+  fd_base64_encode( msg_b,  fd_txn_m_payload( txnm ), 1232 );
+    FD_LOG_WARNING(( "MBE server: " FD_IP4_ADDR_FMT " sent bundle %s", FD_IP4_ADDR_FMT_ARGS( ctx->server_ip4_addr ), msg_b ));
 }
 
 /* Forwards a regular transaction to the tango message bus. */
@@ -743,11 +794,13 @@ fd_bundle_client_handle_builder_fee_info(
     FD_LOG_WARNING(( "BlockBuilderFeeInfoResponse commission out of range (0-100): %lu", res.commission ));
     return;
   }
-
   ctx->builder_commission = (uchar)res.commission;
-  if( FD_UNLIKELY( !fd_base58_decode_32( res.pubkey, ctx->builder_pubkey ) ) ) {
-    FD_LOG_HEXDUMP_WARNING(( "Invalid pubkey in BlockBuilderFeeInfoResponse", res.pubkey, strnlen( res.pubkey, sizeof(res.pubkey) ) ));
-    return;
+  if( FD_UNLIKELY( !fd_memeq( res.pubkey, EMPTY_KEY, 45 )  ) ){
+    if( FD_UNLIKELY( !fd_base58_decode_32( res.pubkey, ctx->builder_pubkey ) ) ) {
+      FD_LOG_WARNING(( "BLOCKBUILDERINFO: %i | comm: %i", !fd_memeq( res.pubkey, EMPTY_KEY, 45 ), ctx->builder_commission ));
+      FD_LOG_HEXDUMP_WARNING(( "Invalid pubkey in BlockBuilderFeeInfoResponse", res.pubkey, strnlen( res.pubkey, sizeof(res.pubkey) ) ));
+      return;
+    }
   }
 
   long validity_duration_ns = (long)( 60e9 * 5. ); /* 5 minutes */
