@@ -451,6 +451,8 @@ fd_bundle_tile_publish_bundle_txn(
 ) {
   if( FD_UNLIKELY( !ctx->builder_info_avail ) ) {
     ctx->metrics.missing_builder_info_fail_cnt++; /* unreachable */
+
+    FD_LOG_WARNING(( "MBE server: " FD_IP4_ADDR_FMT " missing builder info", FD_IP4_ADDR_FMT_ARGS( ctx->server_ip4_addr ) ));
     return;
   }
 
@@ -481,6 +483,7 @@ fd_bundle_tile_publish_bundle_txn(
   fd_stem_publish( ctx->stem, ctx->verify_out.idx, sig, ctx->verify_out.chunk, sz, 0UL, 0UL, tspub );
   ctx->verify_out.chunk = fd_dcache_compact_next( ctx->verify_out.chunk, sz, ctx->verify_out.chunk0, ctx->verify_out.wmark );
   ctx->metrics.txn_received_cnt++;
+    FD_LOG_WARNING(( "MBE server: " FD_IP4_ADDR_FMT " sent bundle %lu", FD_IP4_ADDR_FMT_ARGS( ctx->server_ip4_addr ), ctx->bundle_seq ));
 }
 
 /* Forwards a regular transaction to the tango message bus. */

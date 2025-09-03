@@ -9,6 +9,7 @@
 
 #define NAME_SZ                          (256UL)
 #define AFFINITY_SZ                      (256UL)
+#define MAX_BLOCK_ENGINES                (  3UL)
 #define CONFIGURE_STAGE_COUNT            ( 12UL)
 #define FD_CONFIG_GOSSIP_ENTRYPOINTS_MAX ( 16UL)
 
@@ -367,6 +368,8 @@ struct fd_config {
     struct {
       int  enabled;
       char url[ 256 ];
+      ulong urls_cnt;
+      char  urls[ MAX_BLOCK_ENGINES ][ 256 ];
       char tls_domain_name[ 256 ];
       char tip_distribution_program_addr[ FD_BASE58_ENCODED_32_SZ ];
       char tip_payment_program_addr[ FD_BASE58_ENCODED_32_SZ ];
