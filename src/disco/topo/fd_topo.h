@@ -1,6 +1,7 @@
 #ifndef HEADER_fd_src_disco_topo_fd_topo_h
 #define HEADER_fd_src_disco_topo_fd_topo_h
 
+/*#include "../../app/shared/fd_config.h"*/
 #include "../stem/fd_stem.h"
 #include "../../tango/fd_tango.h"
 #include "../../waltz/xdp/fd_xdp1.h"
@@ -257,6 +258,7 @@ struct fd_topo_tile {
     struct {
       char  url[ 256 ];
       ulong url_len;
+      ulong bundle_tile_cnt;
       char  sni[ 256 ];
       ulong sni_len;
       char  identity_key_path[ PATH_MAX ];

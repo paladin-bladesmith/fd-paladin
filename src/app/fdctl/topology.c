@@ -165,7 +165,7 @@ fd_topo_initialize( config_t * config ) {
                    fd_topos_tile_in_net(  topo,                          "metric_in", "shred_net",    j,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED ); /* No reliable consumers of networking fragments, may be dropped or overrun */
 
   FOR(quic_tile_cnt) for( ulong j=0UL; j<net_tile_cnt; j++ )
-                       fd_topob_tile_in(  topo, "quic",    i,            "metric_in", "net_quic",     j,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED ); /* No reliable consumers of networking fragments, may be dropped or overrun */
+                       fd_topob_tile_in( topo, "quic",    i,            "metric_in", "net_quic",     j,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED ); /* No reliable consumers of networking fragments, may be dropped or overrun */
   FOR(quic_tile_cnt)   fd_topob_tile_out( topo, "quic",    i,                         "quic_verify",  i                                                  );
   FOR(quic_tile_cnt)   fd_topob_tile_out( topo, "quic",    i,                         "quic_net",     i                                                  );
   /* All verify tiles read from all QUIC tiles, packets are round robin. */
@@ -287,26 +287,37 @@ fd_topo_initialize( config_t * config ) {
     fd_topob_wksp( topo, "sign_pack"    );
     fd_topob_wksp( topo, "bundle"       );
 
-    /**/                 fd_topob_link( topo, "bundle_verif", "bundle_verif", config->tiles.verify.receive_buffer_size, FD_TPU_PARSED_MTU,         1UL );
-    /**/                 fd_topob_link( topo, "bundle_sign",  "bundle_sign",  65536UL,                                  9UL,                       1UL );
-    /**/                 fd_topob_link( topo, "sign_bundle",  "sign_bundle",  128UL,                                    64UL,                      1UL );
+    ulong bundle_tile_cnt = 1;
+    /*TODO: Backwards compatibility, remove url later for urls.*/
+    if( FD_LIKELY( 0==strcmp( config->tiles.bundle.url, config->tiles.bundle.urls[ 0 ] ) ) ){
+      bundle_tile_cnt = 0;
+    }
+    for( ulong i = 0; i<MAX_BLOCK_ENGINES; i++ ){
+      if( FD_UNLIKELY( 0==strcmp( config->tiles.bundle.urls[ i ], "" ) ) ) break;
+      bundle_tile_cnt++;
+    }
+
+    FOR(bundle_tile_cnt) fd_topob_link( topo, "bundle_verif", "bundle_verif", config->tiles.verify.receive_buffer_size, FD_TPU_PARSED_MTU,         1UL );
+    FOR(bundle_tile_cnt) fd_topob_link( topo, "bundle_sign",  "bundle_sign",  65536UL,                                  9UL,                       1UL );
+    FOR(bundle_tile_cnt) fd_topob_link( topo, "sign_bundle",  "sign_bundle",  128UL,                                    64UL,                      1UL );
     /**/                 fd_topob_link( topo, "pack_sign",    "pack_sign",    65536UL,                                  1232UL,                    1UL );
     /**/                 fd_topob_link( topo, "sign_pack",    "sign_pack",    128UL,                                    64UL,                      1UL );
 
-    /**/                 fd_topob_tile( topo, "bundle",  "bundle",  "metric_in", tile_to_cpu[ topo->tile_cnt ], 0, 1 );
+    FOR(bundle_tile_cnt) fd_topob_tile( topo, "bundle",  "bundle",  "metric_in", tile_to_cpu[ topo->tile_cnt ], 0, 1 );
 
-    /**/                 fd_topob_tile_out( topo, "bundle", 0UL, "bundle_verif", 0UL );
-    FOR(verify_tile_cnt) fd_topob_tile_in(  topo, "verify", i,             "metric_in", "bundle_verif",   0UL,        FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED   );
+    FOR(bundle_tile_cnt) fd_topob_tile_out( topo, "bundle", i, "bundle_verif", i );
+    FOR(verify_tile_cnt) for( ulong j=0; j<bundle_tile_cnt; j++ )
+                         fd_topob_tile_in(  topo, "verify", i,             "metric_in",  "bundle_verif",   j,       FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED   );
 
-    /**/                 fd_topob_tile_in(  topo, "sign",   0UL,           "metric_in", "bundle_sign",    0UL,        FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   );
-    /**/                 fd_topob_tile_out( topo, "bundle", 0UL,                        "bundle_sign",    0UL                                                );
-    /**/                 fd_topob_tile_in(  topo, "bundle", 0UL,           "metric_in", "sign_bundle",    0UL,        FD_TOPOB_UNRELIABLE, FD_TOPOB_UNPOLLED );
-    /**/                 fd_topob_tile_out( topo, "sign",   0UL,                        "sign_bundle",    0UL                                                );
+    FOR(bundle_tile_cnt) fd_topob_tile_in(  topo, "sign",   0UL,           "metric_in",  "bundle_sign",    i,       FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   );
+    FOR(bundle_tile_cnt) fd_topob_tile_out( topo, "bundle", i,                           "bundle_sign",    i                                               );
+    FOR(bundle_tile_cnt) fd_topob_tile_in(  topo, "bundle", i,             "metric_in",  "sign_bundle",    i,       FD_TOPOB_UNRELIABLE, FD_TOPOB_UNPOLLED );
+    FOR(bundle_tile_cnt) fd_topob_tile_out( topo, "sign",   0UL,                         "sign_bundle",    i                                               );
 
-    /**/                 fd_topob_tile_in(  topo, "sign",   0UL,           "metric_in", "pack_sign",      0UL,        FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   );
-    /**/                 fd_topob_tile_out( topo, "pack",   0UL,                        "pack_sign",      0UL                                                );
-    /**/                 fd_topob_tile_in(  topo, "pack",   0UL,           "metric_in", "sign_pack",      0UL,        FD_TOPOB_UNRELIABLE, FD_TOPOB_UNPOLLED );
-    /**/                 fd_topob_tile_out( topo, "sign",   0UL,                        "sign_pack",      0UL                                                );
+    /**/                 fd_topob_tile_in(  topo, "sign",   0UL,           "metric_in",  "pack_sign",      0UL,     FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   );
+    /**/                 fd_topob_tile_out( topo, "pack",   0UL,                         "pack_sign",      0UL                                             );
+    /**/                 fd_topob_tile_in(  topo, "pack",   0UL,           "metric_in",  "sign_pack",      0UL,     FD_TOPOB_UNRELIABLE, FD_TOPOB_UNPOLLED );
+    /**/                 fd_topob_tile_out( topo, "sign",   0UL,                         "sign_pack",      0UL                                             );
 
     if( plugins_enabled ) {
       fd_topob_wksp( topo, "bundle_plugi" );
@@ -400,141 +411,143 @@ fd_topo_configure_tile( fd_topo_tile_t * tile,
                         fd_config_t *    config ) {
   int plugins_enabled = config->tiles.gui.enabled;
 
-  if( FD_UNLIKELY( !strcmp( tile->name, "net" ) || !strcmp( tile->name, "sock" ) ) ) {
+    if( FD_UNLIKELY( !strcmp( tile->name, "net" ) || !strcmp( tile->name, "sock" ) ) ) {
 
-    tile->net.shred_listen_port              = config->tiles.shred.shred_listen_port;
-    tile->net.quic_transaction_listen_port   = config->tiles.quic.quic_transaction_listen_port;
-    tile->net.legacy_transaction_listen_port = config->tiles.quic.regular_transaction_listen_port;
+      tile->net.shred_listen_port              = config->tiles.shred.shred_listen_port;
+      tile->net.quic_transaction_listen_port   = config->tiles.quic.quic_transaction_listen_port;
+      tile->net.legacy_transaction_listen_port = config->tiles.quic.regular_transaction_listen_port;
 
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "netlnk" ) ) ) {
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "netlnk" ) ) ) {
 
-    /* already configured */
+      /* already configured */
 
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "quic" ) ) ) {
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "quic" ) ) ) {
 
-    tile->quic.reasm_cnt                      = config->tiles.quic.txn_reassembly_count;
-    tile->quic.out_depth                      = config->tiles.verify.receive_buffer_size;
-    tile->quic.max_concurrent_connections     = config->tiles.quic.max_concurrent_connections;
-    tile->quic.max_concurrent_handshakes      = config->tiles.quic.max_concurrent_handshakes;
-    tile->quic.quic_transaction_listen_port   = config->tiles.quic.quic_transaction_listen_port;
-    tile->quic.idle_timeout_millis            = config->tiles.quic.idle_timeout_millis;
-    tile->quic.ack_delay_millis               = config->tiles.quic.ack_delay_millis;
-    tile->quic.retry                          = config->tiles.quic.retry;
-    fd_cstr_fini( fd_cstr_append_cstr_safe( fd_cstr_init( tile->quic.key_log_path ), config->tiles.quic.ssl_key_log_file, sizeof(tile->quic.key_log_path) ) );
+      tile->quic.reasm_cnt                      = config->tiles.quic.txn_reassembly_count;
+      tile->quic.out_depth                      = config->tiles.verify.receive_buffer_size;
+      tile->quic.max_concurrent_connections     = config->tiles.quic.max_concurrent_connections;
+      tile->quic.max_concurrent_handshakes      = config->tiles.quic.max_concurrent_handshakes;
+      tile->quic.quic_transaction_listen_port   = config->tiles.quic.quic_transaction_listen_port;
+      tile->quic.idle_timeout_millis            = config->tiles.quic.idle_timeout_millis;
+      tile->quic.ack_delay_millis               = config->tiles.quic.ack_delay_millis;
+      tile->quic.retry                          = config->tiles.quic.retry;
+      fd_cstr_fini( fd_cstr_append_cstr_safe( fd_cstr_init( tile->quic.key_log_path ), config->tiles.quic.ssl_key_log_file, sizeof(tile->quic.key_log_path) ) );
 
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "bundle" ) ) ) {
-    strncpy( tile->bundle.url, config->tiles.bundle.url, sizeof(tile->bundle.url) );
-    tile->bundle.url_len = strnlen( tile->bundle.url, 255 );
-    strncpy( tile->bundle.sni, config->tiles.bundle.tls_domain_name, 256 );
-    tile->bundle.sni_len = strnlen( tile->bundle.sni, 255 );
-    strncpy( tile->bundle.identity_key_path, config->paths.identity_key, sizeof(tile->bundle.identity_key_path) );
-    strncpy( tile->bundle.key_log_path, config->development.bundle.ssl_key_log_file, sizeof(tile->bundle.key_log_path) );
-    tile->bundle.buf_sz = config->development.bundle.buffer_size_kib<<10;
-    tile->bundle.ssl_heap_sz = config->development.bundle.ssl_heap_size_mib<<20;
-    tile->bundle.keepalive_interval_nanos = config->tiles.bundle.keepalive_interval_millis * (ulong)1e6;
-    tile->bundle.tls_cert_verify = !!config->tiles.bundle.tls_cert_verify;
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "verify" ) ) ) {
-    tile->verify.tcache_depth = config->tiles.verify.signature_cache_size;
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "bundle" ) ) ) {
+      fd_memcpy( tile->bundle.url, config->tiles.bundle.urls[ tile->kind_id ], sizeof(tile->bundle.url) );
+      /*TODO: remove backwards compatibility*/
+      for( ulong i=0; i<MAX_BLOCK_ENGINES;i++ ){
+        if( 0==strcmp( config->tiles.bundle.urls[ i ], "") ) break;
+        tile->bundle.bundle_tile_cnt++;
+      }
+      tile->bundle.url_len = strnlen( tile->bundle.url, 255 );
+      strncpy( tile->bundle.sni, config->tiles.bundle.tls_domain_name, 256 );
+      tile->bundle.sni_len = strnlen( tile->bundle.sni, 255 );
+      strncpy( tile->bundle.identity_key_path, config->paths.identity_key, sizeof(tile->bundle.identity_key_path) );
+      strncpy( tile->bundle.key_log_path, config->development.bundle.ssl_key_log_file, sizeof(tile->bundle.key_log_path) );
+      tile->bundle.buf_sz = config->development.bundle.buffer_size_kib<<10;
+      tile->bundle.ssl_heap_sz = config->development.bundle.ssl_heap_size_mib<<20;
+      tile->bundle.keepalive_interval_nanos = config->tiles.bundle.keepalive_interval_millis * (ulong)1e6;
+      tile->bundle.tls_cert_verify = !!config->tiles.bundle.tls_cert_verify;
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "verify" ) ) ) {
+      tile->verify.tcache_depth = config->tiles.verify.signature_cache_size;
 
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "dedup" ) ) ) {
-    tile->dedup.tcache_depth = config->tiles.dedup.signature_cache_size;
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "dedup" ) ) ) {
+      tile->dedup.tcache_depth = config->tiles.dedup.signature_cache_size;
 
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "resolv" ) ) ) {
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "resolv" ) ) ) {
 
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "pack" ) ) ) {
-    tile->pack.max_pending_transactions      = config->tiles.pack.max_pending_transactions;
-    tile->pack.bank_tile_count               = config->layout.bank_tile_count;
-    tile->pack.larger_max_cost_per_block     = config->development.bench.larger_max_cost_per_block;
-    tile->pack.larger_shred_limits_per_block = config->development.bench.larger_shred_limits_per_block;
-    tile->pack.use_consumed_cus              = config->tiles.pack.use_consumed_cus;
-    tile->pack.schedule_strategy             = config->tiles.pack.schedule_strategy_enum;
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "pack" ) ) ) {
+      tile->pack.max_pending_transactions      = config->tiles.pack.max_pending_transactions;
+      tile->pack.bank_tile_count               = config->layout.bank_tile_count;
+      tile->pack.larger_max_cost_per_block     = config->development.bench.larger_max_cost_per_block;
+      tile->pack.larger_shred_limits_per_block = config->development.bench.larger_shred_limits_per_block;
+      tile->pack.use_consumed_cus              = config->tiles.pack.use_consumed_cus;
+      tile->pack.schedule_strategy             = config->tiles.pack.schedule_strategy_enum;
 
-    if( FD_UNLIKELY( config->tiles.bundle.enabled ) ) {
+      if( FD_UNLIKELY( config->tiles.bundle.enabled ) ) {
 #define PARSE_PUBKEY( _tile, f ) \
-      if( FD_UNLIKELY( !fd_base58_decode_32( config->tiles.bundle.f, tile->_tile.bundle.f ) ) )  \
-        FD_LOG_ERR(( "[tiles.bundle.enabled] set to true, but failed to parse [tiles.bundle."#f"] %s", config->tiles.bundle.f ));
-      tile->pack.bundle.enabled = 1;
-      PARSE_PUBKEY( pack, tip_distribution_program_addr );
-      PARSE_PUBKEY( pack, tip_payment_program_addr      );
-      PARSE_PUBKEY( pack, tip_distribution_authority    );
-      tile->pack.bundle.commission_bps = config->tiles.bundle.commission_bps;
-      strncpy( tile->pack.bundle.identity_key_path, config->paths.identity_key, sizeof(tile->pack.bundle.identity_key_path) );
-      strncpy( tile->pack.bundle.vote_account_path, config->paths.vote_account, sizeof(tile->pack.bundle.vote_account_path) );
-    } else {
-      fd_memset( &tile->pack.bundle, '\0', sizeof(tile->pack.bundle) );
-    }
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "bank" ) ) ) {
+        if( FD_UNLIKELY( !fd_base58_decode_32( config->tiles.bundle.f, tile->_tile.bundle.f ) ) )  \
+          FD_LOG_ERR(( "[tiles.bundle.enabled] set to true, but failed to parse [tiles.bundle."#f"] %s", config->tiles.bundle.f ));
+        tile->pack.bundle.enabled = 1;
+        PARSE_PUBKEY( pack, tip_distribution_program_addr );
+        PARSE_PUBKEY( pack, tip_payment_program_addr      );
+        PARSE_PUBKEY( pack, tip_distribution_authority    );
+        tile->pack.bundle.commission_bps = config->tiles.bundle.commission_bps;
+        strncpy( tile->pack.bundle.identity_key_path, config->paths.identity_key, sizeof(tile->pack.bundle.identity_key_path) );
+        strncpy( tile->pack.bundle.vote_account_path, config->paths.vote_account, sizeof(tile->pack.bundle.vote_account_path) );
+      } else {
+        fd_memset( &tile->pack.bundle, '\0', sizeof(tile->pack.bundle) );
+      }
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "bank" ) ) ) {
 
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "poh" ) ) ) {
-    strncpy( tile->poh.identity_key_path, config->paths.identity_key, sizeof(tile->poh.identity_key_path) );
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "poh" ) ) ) {
+      strncpy( tile->poh.identity_key_path, config->paths.identity_key, sizeof(tile->poh.identity_key_path) );
 
-    tile->poh.plugins_enabled = plugins_enabled;
-    tile->poh.bank_cnt = config->layout.bank_tile_count;
-    tile->poh.lagged_consecutive_leader_start = config->tiles.poh.lagged_consecutive_leader_start;
+      tile->poh.plugins_enabled = plugins_enabled;
+      tile->poh.bank_cnt = config->layout.bank_tile_count;
+      tile->poh.lagged_consecutive_leader_start = config->tiles.poh.lagged_consecutive_leader_start;
 
-    if( FD_UNLIKELY( config->tiles.bundle.enabled ) ) {
-      tile->poh.bundle.enabled = 1;
-      PARSE_PUBKEY( poh, tip_distribution_program_addr );
-      PARSE_PUBKEY( poh, tip_payment_program_addr      );
-      strncpy( tile->poh.bundle.vote_account_path, config->paths.vote_account, sizeof(tile->poh.bundle.vote_account_path) );
+      if( FD_UNLIKELY( config->tiles.bundle.enabled ) ) {
+        tile->poh.bundle.enabled = 1;
+        PARSE_PUBKEY( poh, tip_distribution_program_addr );
+        PARSE_PUBKEY( poh, tip_payment_program_addr      );
+        strncpy( tile->poh.bundle.vote_account_path, config->paths.vote_account, sizeof(tile->poh.bundle.vote_account_path) );
 #undef PARSE_PUBKEY
+      } else {
+        fd_memset( &tile->poh.bundle, '\0', sizeof(tile->poh.bundle) );
+      }
+
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "shred" ) ) ) {
+      strncpy( tile->shred.identity_key_path, config->paths.identity_key, sizeof(tile->shred.identity_key_path) );
+
+      tile->shred.depth                         = config->topo.links[ tile->out_link_id[ 0 ] ].depth;
+      tile->shred.fec_resolver_depth            = config->tiles.shred.max_pending_shred_sets;
+      tile->shred.expected_shred_version        = config->consensus.expected_shred_version;
+      tile->shred.shred_listen_port             = config->tiles.shred.shred_listen_port;
+      tile->shred.larger_shred_limits_per_block = config->development.bench.larger_shred_limits_per_block;
+      for( ulong i=0UL; i<config->tiles.shred.additional_shred_destinations_retransmit_cnt; i++ ) {
+        parse_ip_port( "tiles.shred.additional_shred_destinations_retransmit",
+                       config->tiles.shred.additional_shred_destinations_retransmit[ i ],
+                       &tile->shred.adtl_dests_retransmit[ i ] );
+      }
+      tile->shred.adtl_dests_retransmit_cnt = config->tiles.shred.additional_shred_destinations_retransmit_cnt;
+      for( ulong i=0UL; i<config->tiles.shred.additional_shred_destinations_leader_cnt; i++ ) {
+        parse_ip_port( "tiles.shred.additional_shred_destinations_leader",
+                       config->tiles.shred.additional_shred_destinations_leader[ i ],
+                       &tile->shred.adtl_dests_leader[ i ] );
+      }
+      tile->shred.adtl_dests_leader_cnt = config->tiles.shred.additional_shred_destinations_leader_cnt;
+
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "store" ) ) ) {
+      tile->store.disable_blockstore_from_slot = config->development.bench.disable_blockstore_from_slot;
+
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "sign" ) ) ) {
+      strncpy( tile->sign.identity_key_path, config->paths.identity_key, sizeof(tile->sign.identity_key_path) );
+
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "metric" ) ) ) {
+      if( FD_UNLIKELY( !fd_cstr_to_ip4_addr( config->tiles.metric.prometheus_listen_address, &tile->metric.prometheus_listen_addr ) ) )
+        FD_LOG_ERR(( "failed to parse prometheus listen address `%s`", config->tiles.metric.prometheus_listen_address ));
+      tile->metric.prometheus_listen_port = config->tiles.metric.prometheus_listen_port;
+
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "cswtch" ) ) ) {
+
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "gui" ) ) ) {
+      if( FD_UNLIKELY( !fd_cstr_to_ip4_addr( config->tiles.gui.gui_listen_address, &tile->gui.listen_addr ) ) )
+        FD_LOG_ERR(( "failed to parse gui listen address `%s`", config->tiles.gui.gui_listen_address ));
+      tile->gui.listen_port = config->tiles.gui.gui_listen_port;
+      tile->gui.is_voting = strcmp( config->paths.vote_account, "" );
+      strncpy( tile->gui.cluster, config->cluster, sizeof(tile->gui.cluster) );
+      strncpy( tile->gui.identity_key_path, config->paths.identity_key, sizeof(tile->gui.identity_key_path) );
+      strncpy( tile->gui.vote_key_path, config->paths.vote_account, sizeof(tile->gui.vote_key_path) );
+      tile->gui.max_http_connections      = config->tiles.gui.max_http_connections;
+      tile->gui.max_websocket_connections = config->tiles.gui.max_websocket_connections;
+      tile->gui.max_http_request_length   = config->tiles.gui.max_http_request_length;
+      tile->gui.send_buffer_size_mb       = config->tiles.gui.send_buffer_size_mb;
+      tile->gui.schedule_strategy         = config->tiles.pack.schedule_strategy_enum;
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "plugin" ) ) ) {
+
     } else {
-      fd_memset( &tile->poh.bundle, '\0', sizeof(tile->poh.bundle) );
+      FD_LOG_ERR(( "unknown tile name %lu `%s`", tile->id, tile->name ));
     }
-
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "shred" ) ) ) {
-    strncpy( tile->shred.identity_key_path, config->paths.identity_key, sizeof(tile->shred.identity_key_path) );
-
-    tile->shred.depth                         = config->topo.links[ tile->out_link_id[ 0 ] ].depth;
-    tile->shred.fec_resolver_depth            = config->tiles.shred.max_pending_shred_sets;
-    tile->shred.expected_shred_version        = config->consensus.expected_shred_version;
-    tile->shred.shred_listen_port             = config->tiles.shred.shred_listen_port;
-    tile->shred.larger_shred_limits_per_block = config->development.bench.larger_shred_limits_per_block;
-    for( ulong i=0UL; i<config->tiles.shred.additional_shred_destinations_retransmit_cnt; i++ ) {
-      parse_ip_port( "tiles.shred.additional_shred_destinations_retransmit",
-                      config->tiles.shred.additional_shred_destinations_retransmit[ i ],
-                      &tile->shred.adtl_dests_retransmit[ i ] );
-    }
-    tile->shred.adtl_dests_retransmit_cnt = config->tiles.shred.additional_shred_destinations_retransmit_cnt;
-    for( ulong i=0UL; i<config->tiles.shred.additional_shred_destinations_leader_cnt; i++ ) {
-      parse_ip_port( "tiles.shred.additional_shred_destinations_leader",
-                      config->tiles.shred.additional_shred_destinations_leader[ i ],
-                      &tile->shred.adtl_dests_leader[ i ] );
-    }
-    tile->shred.adtl_dests_leader_cnt = config->tiles.shred.additional_shred_destinations_leader_cnt;
-
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "store" ) ) ) {
-    tile->store.disable_blockstore_from_slot = config->development.bench.disable_blockstore_from_slot;
-
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "sign" ) ) ) {
-    strncpy( tile->sign.identity_key_path, config->paths.identity_key, sizeof(tile->sign.identity_key_path) );
-
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "metric" ) ) ) {
-    if( FD_UNLIKELY( !fd_cstr_to_ip4_addr( config->tiles.metric.prometheus_listen_address, &tile->metric.prometheus_listen_addr ) ) )
-      FD_LOG_ERR(( "failed to parse prometheus listen address `%s`", config->tiles.metric.prometheus_listen_address ));
-    tile->metric.prometheus_listen_port = config->tiles.metric.prometheus_listen_port;
-
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "cswtch" ) ) ) {
-
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "gui" ) ) ) {
-    if( FD_UNLIKELY( !fd_cstr_to_ip4_addr( config->tiles.gui.gui_listen_address, &tile->gui.listen_addr ) ) )
-      FD_LOG_ERR(( "failed to parse gui listen address `%s`", config->tiles.gui.gui_listen_address ));
-    tile->gui.listen_port = config->tiles.gui.gui_listen_port;
-    tile->gui.is_voting = strcmp( config->paths.vote_account, "" );
-    strncpy( tile->gui.cluster, config->cluster, sizeof(tile->gui.cluster) );
-    strncpy( tile->gui.identity_key_path, config->paths.identity_key, sizeof(tile->gui.identity_key_path) );
-    strncpy( tile->gui.vote_key_path, config->paths.vote_account, sizeof(tile->gui.vote_key_path) );
-    tile->gui.max_http_connections      = config->tiles.gui.max_http_connections;
-    tile->gui.max_websocket_connections = config->tiles.gui.max_websocket_connections;
-    tile->gui.max_http_request_length   = config->tiles.gui.max_http_request_length;
-    tile->gui.send_buffer_size_mb       = config->tiles.gui.send_buffer_size_mb;
-    tile->gui.schedule_strategy         = config->tiles.pack.schedule_strategy_enum;
-    tile->gui.websocket_compression     = config->development.gui.websocket_compression;
-    tile->gui.frontend_release_channel  = config->development.gui.frontend_release_channel_enum;
-
-  } else if( FD_UNLIKELY( !strcmp( tile->name, "plugin" ) ) ) {
-
-  } else {
-    FD_LOG_ERR(( "unknown tile name %lu `%s`", tile->id, tile->name ));
-  }
 }
