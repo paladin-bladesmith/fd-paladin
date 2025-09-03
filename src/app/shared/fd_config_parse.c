@@ -315,6 +315,7 @@ fdctl_pod_to_cfg( config_t * config,
 
   CFG_POP      ( bool,   tiles.bundle.enabled                             );
   CFG_POP      ( cstr,   tiles.bundle.url                                 );
+  CFG_POP_ARRAY( cstr,   tiles.bundle.urls                                );
   CFG_POP      ( cstr,   tiles.bundle.tls_domain_name                     );
   CFG_POP      ( cstr,   tiles.bundle.tip_distribution_program_addr       );
   CFG_POP      ( cstr,   tiles.bundle.tip_payment_program_addr            );
