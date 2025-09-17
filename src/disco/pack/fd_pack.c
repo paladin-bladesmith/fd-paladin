@@ -11,7 +11,9 @@
 #include "../metrics/fd_metrics.h"
 
 #define FD_PACK_USE_NON_TEMPORAL_MEMCPY 1
-
+#define FD_PACK_ORD_TXN_TYPE_TXN 2
+#define FD_PACK_ORD_TXN_TYPE_BUNDLE 4
+#define FD_PACK_ORD_TXN_TYPE_MEVTX 8
 /* Declare a bunch of helper structs used for pack-internal data
    structures. */
 typedef struct {
@@ -35,7 +37,22 @@ struct fd_pack_private_ord_txn {
      store which tree.  This should be one of the FD_ORD_TXN_ROOT_*
      values. */
   int root;
-
+  
+  /*Is this transaction a pointer to the first in the bundle*/
+  uchar txn_type_bitset;
+  ulong bundle_txn_cnt;
+  ulong bundle_idx;
+  ulong bundle_txn_idx;
+  uint r0;
+  uint c0;
+  
+  /*Rather than finding the bundle's first transaction in the bundle treap and then
+   * traversing the treap from there it is simpler to just have each transaction in
+   * the bundle just point to the next one, the last transaction in the bundle will
+   * have this value as NULL. There is no guarantee that non bundle transactions will
+   * have this value as NULL so it is safer to use this after checking txn_type_bitset.*/
+  struct fd_pack_private_ord_txn * _next;
+  
   /* The sig2txn map_chain fields */
   ushort sigmap_next;
   ushort sigmap_prev;
@@ -1396,7 +1413,7 @@ fd_pack_insert_txn_fini( fd_pack_t  * pack,
   expq_insert( pack->expiration_q, temp );
 
   if( FD_LIKELY( is_vote ) ) insert_into = pack->pending_votes;
-
+  ord->txn_type_bitset |= FD_PACK_ORD_TXN_TYPE_TXN;
   treap_ele_insert( insert_into, ord, pack->pool );
   return (is_vote) | (replaces<<1) | (is_durable_nonce<<2);
 }
@@ -1682,24 +1699,47 @@ insert_bundle_impl( fd_pack_t           * pack,
                     ulong                 txn_cnt,
                     fd_pack_ord_txn_t * * bundle,
                     ulong                 expires_at ) {
-  ulong prev_reward = ((BUNDLE_L_PRIME * (BUNDLE_N - bundle_idx))) - 1UL;
-  ulong prev_cost = 1UL<<32;
-
+  
+  /*Discard the synthetic pricing FCFS logic in favor of using a simple trick
+   * to order normal transactions and bundles together using revenue/cu as the key.
+   * We create a pointer bundle which is just a pointer of the first transaction in
+   * the bundle and set its rewards and computer_estimate to the sum over all the
+   * transactions in the bundle.*/
+  fd_pack_ord_txn_t * ptr_bundle = bundle[ 0 ];
+  ptr_bundle->txn_type_bitset |= FD_PACK_ORD_TXN_TYPE_BUNDLE;
+  ptr_bundle->bundle_txn_cnt = txn_cnt;
+  /*TODO: not needed, bank recalculates rewards from CU program.*/
+  ptr_bundle->r0 = ptr_bundle->rewards;
+  ptr_bundle->c0 = ptr_bundle->compute_est;
   /* Assign last to first */
   for( ulong i=0UL; i<txn_cnt; i++ ) {
     fd_pack_ord_txn_t * ord = bundle[ txn_cnt-1UL - i ];
-    ord->rewards = (uint)(((ulong)ord->compute_est * (prev_reward + 1UL) + prev_cost-1UL)/prev_cost);
+    fd_pack_ord_txn_t * ord_left = bundle[ i ];
+    ord_left->bundle_idx = bundle_idx;
+    ord_left->bundle_txn_idx = i;
+    if( FD_LIKELY( i<txn_cnt-1 ) ){
+      ord_left->_next = bundle[ i + 1 ];
+    }else{
+      ord_left->_next = NULL;
+    }
+
+    if( FD_LIKELY( i < txn_cnt - 1UL ) ){
+      ptr_bundle->rewards += ord->rewards;
+      ptr_bundle->compute_est += ord->compute_est;
+    }
+
     ord->root    = FD_ORD_TXN_ROOT_PENDING_BUNDLE;
-    prev_reward = ord->rewards;
-    prev_cost   = ord->compute_est;
 
     /* The penalty information isn't used for bundles. */
     ushort penalties  [ FD_TXN_ACCT_ADDR_MAX ];
     uchar  penalty_idx[ FD_TXN_ACCT_ADDR_MAX ];
     populate_bitsets( pack, ord, penalties, penalty_idx );
 
-    treap_ele_insert( pack->pending_bundles, ord, pack->pool );
-    pack->pending_txn_cnt++;
+    /*TODO: We probably don't need to add them to bundle treap.*/
+    /*treap_ele_insert( pack->pending_bundles, ord, pack->pool );*/
+    /*We still increment because we want to keep accurate count of how
+     * many actually transactions are pending*/
+     pack->pending_txn_cnt++;
 
     if( FD_UNLIKELY( ord->txn->flags & FD_TXN_P_FLAGS_DURABLE_NONCE ) ) noncemap_ele_insert( pack->noncemap, ord, pack->pool );
     sig2txn_ele_insert( pack->signature_map, ord, pack->pool );
@@ -1707,7 +1747,7 @@ insert_bundle_impl( fd_pack_t           * pack,
     fd_pack_expq_t temp[ 1 ] = {{ .expires_at = expires_at, .txn = ord }};
     expq_insert( pack->expiration_q, temp );
   }
-
+  treap_ele_insert( pack->pending, ptr_bundle, pack->pool );
 }
 
 void const *
@@ -2477,6 +2517,360 @@ fd_pack_try_schedule_bundle( fd_pack_t  * pack,
   return retval;
 }
 
+static inline sched_return_t
+fd_pack_schedule_impl_universal( ) {
+  sched_return_t to_ret  = { .cus_scheduled = 0, .txns_scheduled = 0, .bytes_scheduled = 0 };
+  return to_ret;
+}
+
+static inline int 
+fd_pack_schedule_bundle_universal( fd_pack_t          * pack,
+                       fd_pack_ord_txn_t  * cand,
+                       treap_rev_iter_t cand_treap_idx,
+                       ulong                cu_limit,
+                       ulong                byte_limit,
+                       ulong                bank_tile,
+                       ulong              * use_by_bank_txn,
+                       fd_txn_p_t         * out ) {
+
+    int state = pack->initializer_bundle_state;
+    if( FD_UNLIKELY( (state==FD_PACK_IB_STATE_PENDING) | (state==FD_PACK_IB_STATE_FAILED ) ) ) return TRY_BUNDLE_NO_READY_BUNDLES;
+    fd_pack_ord_txn_t * pool    = pack->pool;
+
+  int require_ib;
+  if( FD_UNLIKELY( state==FD_PACK_IB_STATE_NOT_INITIALIZED ) ) { require_ib = 1; }
+  if( FD_LIKELY  ( state==FD_PACK_IB_STATE_READY           ) ) { require_ib = 0; }
+
+  /*treap_rev_iter_t _cur  = treap_rev_iter_init( bundles, pool );*/
+  ulong bundle_idx = ULONG_MAX;
+  if( FD_UNLIKELY( cand==NULL ) ){
+    return TRY_BUNDLE_NO_READY_BUNDLES;
+  }
+
+  /*treap_rev_iter_t   _txn0 = _cur;*/
+  fd_pack_ord_txn_t * _cur = cand;
+  fd_pack_ord_txn_t * txn0 = cand; 
+  int is_ib = !!(txn0->txn->flags & FD_TXN_P_FLAGS_INITIALIZER_BUNDLE);
+  /* We use the bundle_idx field instead of RC_TO_REL_BUNDLE_IDX*/
+  bundle_idx = txn0->bundle_idx;
+
+  if( FD_UNLIKELY( require_ib & !is_ib ) ) return TRY_BUNDLE_NO_READY_BUNDLES;
+
+  
+  fd_pack_addr_use_t * bundle_temp_inserted[ FD_PACK_MAX_TXN_PER_BUNDLE * FD_TXN_ACCT_ADDR_MAX ];
+  ulong bundle_temp_inserted_cnt = 0UL;
+
+  ulong bank_tile_mask = 1UL << bank_tile;
+
+  int doesnt_fit   = 0;
+  int has_conflict = 0;
+  ulong txn_cnt = 0UL;
+  ulong microblock_limit = pack->lim->max_microblocks_per_block - pack->microblock_cnt;
+ 
+
+  FD_PACK_BITSET_DECLARE( bitset_rw_in_use );
+  FD_PACK_BITSET_DECLARE( bitset_w_in_use  );
+  FD_PACK_BITSET_COPY( bitset_rw_in_use, pack->bitset_rw_in_use );
+  FD_PACK_BITSET_COPY( bitset_w_in_use,  pack->bitset_w_in_use  );
+
+  /* last_use_in_txn_cnt[i+1] Keeps track of the number of accounts that
+     have their last reference in transaction i of the bundle.  This
+     esoteric value is important for computing use_by_bank_txn.
+     last_use_in_txn_cnt[0] is garbage. */
+  ulong last_use_in_txn_cnt[ 1UL+FD_PACK_MAX_TXN_PER_BUNDLE ] = { 0UL };
+
+  fd_pack_addr_use_t   null_use[1]    = {{{{ 0 }}, { 0 }}};
+
+  while( !(doesnt_fit | has_conflict) & !(_cur==NULL) ){
+    ulong this_bundle_idx = _cur->bundle_idx;
+
+    /* This is most probably not required since we are not traversing the treap her but rather traversing the linked list of bundle transactions */
+    if( FD_UNLIKELY( this_bundle_idx!=bundle_idx ) ) break;
+    ulong txn_compute_est = _cur->bundle_txn_idx==0 ? _cur->c0 : _cur->compute_est;
+
+    if( FD_UNLIKELY( txn_compute_est>cu_limit ) ) {
+      doesnt_fit = 1;
+      FD_MCNT_INC( PACK, TRANSACTION_SCHEDULE_CU_LIMIT,   1UL );
+      break;
+    }
+    cu_limit -= txn_compute_est;
+
+    /* Each transaction in a bundle turns into a microblock */
+    if( FD_UNLIKELY( microblock_limit==0UL ) ) {
+      doesnt_fit = 1;
+      FD_MCNT_INC( PACK, MICROBLOCK_PER_BLOCK_LIMIT, 1UL );
+      break;
+    }
+    microblock_limit--;
+
+    if( FD_UNLIKELY( _cur->txn->payload_sz+MICROBLOCK_DATA_OVERHEAD>byte_limit ) ) {
+      doesnt_fit = 1;
+      FD_MCNT_INC( PACK, TRANSACTION_SCHEDULE_BYTE_LIMIT, 1UL );
+      break;
+    }
+    byte_limit -= _cur->txn->payload_sz + MICROBLOCK_DATA_OVERHEAD;
+
+    if( FD_UNLIKELY( !FD_PACK_BITSET_INTERSECT4_EMPTY( pack->bitset_rw_in_use, pack->bitset_w_in_use, _cur->w_bitset, _cur->rw_bitset ) ) ) {
+      has_conflict = 1;
+      FD_MCNT_INC( PACK, TRANSACTION_SCHEDULE_FAST_PATH,  1UL );
+      break;
+    }
+
+    /* Don't update the actual in-use bitset, because the transactions
+       in the bundle are allowed to conflict with each other. */
+    FD_PACK_BITSET_OR( bitset_rw_in_use, _cur->rw_bitset );
+    FD_PACK_BITSET_OR( bitset_w_in_use,  _cur->w_bitset  );
+
+    fd_txn_t const * txn = TXN(_cur->txn);
+    fd_acct_addr_t const * accts   = fd_txn_get_acct_addrs( txn, _cur->txn->payload );
+    fd_acct_addr_t const * alt_adj = _cur->txn_e->alt_accts - fd_txn_account_cnt( txn, FD_TXN_ACCT_CAT_IMM );
+
+    /* Check conflicts between this transaction's writable accounts and
+       current readers */
+    for( fd_txn_acct_iter_t iter=fd_txn_acct_iter_init( txn, FD_TXN_ACCT_CAT_WRITABLE );
+        iter!=fd_txn_acct_iter_end(); iter=fd_txn_acct_iter_next( iter ) ) {
+
+      fd_acct_addr_t acct = *ACCT_ITER_TO_PTR( iter );
+
+      fd_pack_addr_use_t * in_bundle_temp = acct_uses_query( pack->bundle_temp_map, acct, null_use );
+      ulong current_cost                  = acct_uses_query( pack->writer_costs,    acct, null_use )->total_cost;
+      ulong carried_cost                  = (ulong)in_bundle_temp->carried_cost;
+      if( FD_UNLIKELY( current_cost + carried_cost + _cur->compute_est > pack->lim->max_write_cost_per_acct ) ) {
+        doesnt_fit = 1;
+        FD_MCNT_INC( PACK, TRANSACTION_SCHEDULE_WRITE_COST, 1UL );
+        break;
+      }
+
+      if( FD_LIKELY( in_bundle_temp==null_use ) ) { /* Not in temp bundle table yet */
+        in_bundle_temp    = acct_uses_insert( pack->bundle_temp_map, acct );
+        in_bundle_temp->_ = 0UL;
+        bundle_temp_inserted[ bundle_temp_inserted_cnt++ ] = in_bundle_temp;
+      }
+      in_bundle_temp->carried_cost += (uint)_cur->compute_est; /* < 2^21, but >0 */
+      in_bundle_temp->ref_cnt++;
+      last_use_in_txn_cnt[ in_bundle_temp->last_use_in ]--;
+      in_bundle_temp->last_use_in = (ushort)(txn_cnt+1UL);
+      last_use_in_txn_cnt[ in_bundle_temp->last_use_in ]++;
+
+      if( FD_UNLIKELY( acct_uses_query( pack->acct_in_use, acct, null_use )->in_use_by ) ) {
+        has_conflict = 1;
+        FD_MCNT_INC( PACK, TRANSACTION_SCHEDULE_SLOW_PATH,  1UL );
+        break;
+      }
+    }
+    if( has_conflict | doesnt_fit ) break;
+
+    /* Check conflicts between this transaction's readonly accounts and
+       current writers */
+    for( fd_txn_acct_iter_t iter=fd_txn_acct_iter_init( txn, FD_TXN_ACCT_CAT_READONLY );
+        iter!=fd_txn_acct_iter_end(); iter=fd_txn_acct_iter_next( iter ) ) {
+
+      fd_acct_addr_t const * acct = ACCT_ITER_TO_PTR( iter );
+      if( fd_pack_unwritable_contains( acct ) ) continue; /* No need to track sysvars because they can't be writable */
+
+      fd_pack_addr_use_t * in_bundle_temp = acct_uses_query( pack->bundle_temp_map, *acct, null_use );
+      if( FD_LIKELY( in_bundle_temp==null_use ) ) { /* Not in temp bundle table yet */
+        in_bundle_temp = acct_uses_insert( pack->bundle_temp_map, *acct );
+        in_bundle_temp->_ = 0UL;
+        bundle_temp_inserted[ bundle_temp_inserted_cnt++ ] = in_bundle_temp;
+      }
+      in_bundle_temp->ref_cnt++;
+      last_use_in_txn_cnt[ in_bundle_temp->last_use_in ]--;
+      in_bundle_temp->last_use_in = (ushort)(txn_cnt+1UL);
+      last_use_in_txn_cnt[ in_bundle_temp->last_use_in ]++;
+
+      if( FD_UNLIKELY( acct_uses_query( pack->acct_in_use,  *acct, null_use )->in_use_by & FD_PACK_IN_USE_WRITABLE ) ) {
+        has_conflict = 1;
+        FD_MCNT_INC( PACK, TRANSACTION_SCHEDULE_SLOW_PATH,  1UL );
+        break;
+      }
+    }
+
+    if( has_conflict | doesnt_fit ) break;
+
+    txn_cnt++;
+    _cur = _cur->_next;
+  }
+  int retval = fd_int_if( doesnt_fit, TRY_BUNDLE_DOES_NOT_FIT,
+                                      fd_int_if( has_conflict, TRY_BUNDLE_HAS_CONFLICTS, TRY_BUNDLE_SUCCESS( (int)txn_cnt ) ) );
+  if( FD_UNLIKELY( retval<=0 ) ) {
+    for( ulong i=0UL; i<bundle_temp_inserted_cnt; i++ ) {
+      acct_uses_remove( pack->bundle_temp_map, bundle_temp_inserted[ bundle_temp_inserted_cnt-i-1UL ] );
+    }
+    FD_TEST( acct_uses_key_cnt( pack->bundle_temp_map )==0UL );
+    return retval;
+  }
+  pack->outstanding_microblock_mask |= bank_tile_mask;
+
+  /* We'll carefully incrementally construct use_by_bank and
+     use_by_bank_txn based on the contents of bundle_temp and
+     last_use_in_txn_cnt. */
+  fd_pack_addr_use_t * use_by_bank     = pack->use_by_bank    [bank_tile];
+  /*TODO: Check if passing this as param is good enough */
+  /*ulong              * use_by_bank_txn = pack->use_by_bank_txn[bank_tile];*/
+  ulong cum_sum = 0UL;
+  for( ulong k=0UL; k<txn_cnt; k++ ) { use_by_bank_txn[k] = cum_sum; cum_sum += last_use_in_txn_cnt[ k+1UL ]; }
+  pack->use_by_bank_cnt[bank_tile] = cum_sum;
+  fd_pack_ord_txn_t * _next;
+  for( _cur=txn0; _cur!=NULL; _cur=_next ) {
+    _next = _cur->_next;
+
+    /*fd_pack_ord_txn_t * cur = treap_rev_iter_ele( _cur, pool );*/
+    fd_txn_t const    * txn = TXN(_cur->txn);
+    fd_memcpy( out->payload, _cur->txn->payload, _cur->txn->payload_sz                                           );
+    fd_memcpy( TXN(out),     txn,               fd_txn_footprint( txn->instr_cnt, txn->addr_table_lookup_cnt ) );
+    out->payload_sz                      = _cur->txn->payload_sz;
+    out->pack_cu.requested_exec_plus_acct_data_cus = _cur->txn->pack_cu.requested_exec_plus_acct_data_cus;
+    out->pack_cu.non_execution_cus       = _cur->txn->pack_cu.non_execution_cus;
+    out->scheduler_arrival_time_nanos    = _cur->txn->scheduler_arrival_time_nanos;
+    out->source_tpu                      = _cur->txn->source_tpu;
+    out->source_ipv4                     = _cur->txn->source_ipv4;
+    out->flags                           = _cur->txn->flags;
+    out++;
+
+    pack->cumulative_block_cost += _cur->compute_est;
+    pack->data_bytes_consumed   += _cur->txn->payload_sz + MICROBLOCK_DATA_OVERHEAD;
+    pack->microblock_cnt        += 1UL;
+
+    if( FD_UNLIKELY( _cur->txn->flags & FD_TXN_P_FLAGS_DURABLE_NONCE ) ) noncemap_ele_remove_fast( pack->noncemap, _cur, pack->pool );
+    sig2txn_ele_remove_fast( pack->signature_map, _cur, pack->pool );
+
+    _cur->root = FD_ORD_TXN_ROOT_FREE;
+    expq_remove( pack->expiration_q, _cur->expq_idx );
+    /*We need to delete each bundle transaction after it is copied into the microblock trailer but only from the pool, the bundle treap should not have any transactions and the normal transaction treap only has the pointer transaction which has to be delted once.*/
+    ulong txn_to_del  = trp_pool_idx( pack->pool, _cur );
+    trp_pool_idx_release( pool,  txn_to_del );
+    pack->pending_txn_cnt--;
+  }
+  treap_idx_remove( pack->pending, cand_treap_idx, pack->pool );
+  for( ulong i=0UL; i<bundle_temp_inserted_cnt; i++ ) {
+    /* In order to clear bundle_temp_map with the typical trick, we need
+       to iterate through bundle_temp_inserted backwards. */
+    fd_pack_addr_use_t * addr_use = bundle_temp_inserted[ bundle_temp_inserted_cnt-i-1UL ];
+
+    int any_writers = addr_use->carried_cost>0U; /* Did any transaction in this bundle write lock this account address? */
+
+    if( FD_LIKELY( any_writers ) ) { /* UNLIKELY? */
+      fd_pack_addr_use_t * in_wcost_table = acct_uses_query( pack->writer_costs, addr_use->key, NULL );
+      if( !in_wcost_table ) {
+        in_wcost_table = acct_uses_insert( pack->writer_costs, addr_use->key );
+        in_wcost_table->total_cost = 0UL;
+        pack->written_list[ pack->written_list_cnt ] = in_wcost_table;
+        pack->written_list_cnt = fd_ulong_min( pack->written_list_cnt+1UL, pack->written_list_max-1UL );
+      }
+      in_wcost_table->total_cost += (ulong)addr_use->carried_cost;
+    }
+
+    /* in_use_by must be set before releasing the bit reference */
+    fd_pack_addr_use_t * use = acct_uses_query( pack->acct_in_use, addr_use->key, NULL );
+    if( !use ) { use = acct_uses_insert( pack->acct_in_use, addr_use->key ); use->in_use_by = 0UL; }
+    use->in_use_by |= bank_tile_mask | fd_ulong_if( any_writers, FD_PACK_IN_USE_WRITABLE, 0UL );
+    use->in_use_by &= ~FD_PACK_IN_USE_BIT_CLEARED;
+
+    use_by_bank[ use_by_bank_txn[ addr_use->last_use_in-1UL ]++ ] = *use;
+
+    for( ulong k=0UL; k<(ulong)addr_use->ref_cnt; k++ ) {
+      release_result_t ret = release_bit_reference( pack, &(addr_use->key) );
+      FD_PACK_BITSET_CLEARN( bitset_rw_in_use, ret.clear_rw_bit );
+      FD_PACK_BITSET_CLEARN( bitset_w_in_use,  ret.clear_w_bit  );
+    }
+
+    acct_uses_remove( pack->bundle_temp_map, addr_use );
+  }
+
+  FD_PACK_BITSET_COPY( pack->bitset_rw_in_use, bitset_rw_in_use );
+  FD_PACK_BITSET_COPY( pack->bitset_w_in_use,  bitset_w_in_use  );
+
+  if( FD_UNLIKELY( is_ib ) ) {
+    pack->initializer_bundle_state = FD_PACK_IB_STATE_PENDING;
+  }
+  return retval;
+}
+
+ulong fd_pack_schedule_next_microblock_universal( fd_pack_t * pack,
+                                                  ulong       total_cus,
+                                                  float       vote_fraction,
+                                                  ulong       bank_tile,
+                                                  int         schedule_flags,
+                                                  fd_txn_p_t * out ){
+  total_cus = fd_ulong_min( total_cus, pack->lim->max_cost_per_block - pack->cumulative_block_cost );
+  ulong vote_cus = fd_ulong_min( (ulong)((float)total_cus * vote_fraction),
+                                 pack->lim->max_vote_cost_per_block - pack->cumulative_vote_cost );
+  ulong vote_reserved_txns = fd_ulong_min( vote_cus/FD_PACK_SIMPLE_VOTE_COST, (ulong)((float)pack->lim->max_txn_per_microblock * vote_fraction ));
+  ulong scheduled = 0;
+
+  if( FD_UNLIKELY( pack->microblock_cnt >=pack->lim->max_microblocks_per_block )){
+    FD_MCNT_INC( PACK, MICROBLOCK_PER_BLOCK_LIMIT, 1UL );
+    return 0UL;
+  }
+  
+  if( FD_UNLIKELY( pack->data_bytes_consumed+MICROBLOCK_DATA_OVERHEAD+FD_TXN_MIN_SERIALIZED_SZ>pack->lim->max_data_bytes_per_block) ) {
+    FD_MCNT_INC( PACK, DATA_PER_BLOCK_LIMIT, 1UL );
+    return 0UL;
+  }
+  ulong * use_by_bank_txn  = pack->use_by_bank_txn[ bank_tile ];
+  ulong cu_limit = total_cus - vote_cus;
+  ulong txn_limit = pack->lim->max_txn_per_microblock - vote_reserved_txns;
+  ulong byte_limit = pack->lim->max_data_bytes_per_block - pack->data_bytes_consumed - MICROBLOCK_DATA_OVERHEAD;
+ sched_return_t status = {0}, status1 = {0};
+
+  if( FD_LIKELY( schedule_flags & FD_PACK_SCHEDULE_VOTE ) ) {
+    /* Schedule vote transactions */
+    status1= fd_pack_schedule_impl( pack, pack->pending_votes, vote_cus, vote_reserved_txns, byte_limit, bank_tile, pack->pending_votes_smallest, use_by_bank_txn, out+scheduled );
+
+    scheduled                   += status1.txns_scheduled;
+    pack->cumulative_vote_cost  += status1.cus_scheduled;
+    pack->cumulative_block_cost += status1.cus_scheduled;
+    pack->data_bytes_consumed   += status1.bytes_scheduled;
+    byte_limit                  -= status1.bytes_scheduled;
+    use_by_bank_txn             += status1.txns_scheduled;
+    /* Add any remaining CUs/txns to the non-vote limits */
+    txn_limit += vote_reserved_txns - status1.txns_scheduled;
+    cu_limit  += vote_cus - status1.cus_scheduled;
+  }
+
+  fd_pack_ord_txn_t  * pool         = pack->pool;
+  treap_rev_iter_t next_txn = treap_idx_null();
+  for( treap_rev_iter_t txn_i=treap_rev_iter_init( pack->pending, pool ); !treap_rev_iter_done( txn_i); txn_i=next_txn ){
+    next_txn = treap_rev_iter_next( txn_i, pool );
+    fd_pack_ord_txn_t * candidate_txn = treap_rev_iter_ele( txn_i, pool );
+    ulong txn_type = candidate_txn->txn_type_bitset;
+      /*We check if this txn is a bundle pointer or normal, if bundle pointer, we iterate over it times bundle txn count, else we just schedule it like a normal txn*/
+    if( FD_UNLIKELY( !!(txn_type & FD_PACK_ORD_TXN_TYPE_BUNDLE) && !!(schedule_flags & FD_PACK_SCHEDULE_BUNDLE) && (status1.txns_scheduled==0UL) ) ){
+      cu_limit         = pack->lim->max_cost_per_block        - pack->cumulative_block_cost;
+      byte_limit       = pack->lim->max_data_bytes_per_block  - pack->data_bytes_consumed;
+      int bundle_result = fd_pack_schedule_bundle_universal( pack, candidate_txn, txn_i, cu_limit, byte_limit, bank_tile, use_by_bank_txn, out ); 
+
+      if( FD_UNLIKELY( bundle_result>0                         ) ) return (ulong)bundle_result;
+      if( FD_UNLIKELY( bundle_result==TRY_BUNDLE_HAS_CONFLICTS ) ) return 0UL;
+    }
+    /* Fill any remaining space with non-vote transactions */
+  if( FD_LIKELY( (schedule_flags & FD_PACK_SCHEDULE_TXN) && (txn_type & FD_PACK_ORD_TXN_TYPE_TXN) ) ) {
+    status = fd_pack_schedule_impl_universal(); 
+    scheduled                   += status.txns_scheduled;
+    pack->cumulative_block_cost += status.cus_scheduled;
+    pack->data_bytes_consumed   += status.bytes_scheduled;
+    }
+
+  }
+
+  ulong nonempty = (ulong)(scheduled>0UL);
+  pack->microblock_cnt              += nonempty;
+  pack->outstanding_microblock_mask |= nonempty << bank_tile;
+  pack->data_bytes_consumed         += nonempty * MICROBLOCK_DATA_OVERHEAD;
+
+  /* Update metrics counters */
+  fd_pack_metrics_write( pack );
+  FD_MGAUGE_SET( PACK, CUS_CONSUMED_IN_BLOCK,         pack->cumulative_block_cost          );
+
+  fd_histf_sample( pack->txn_per_microblock,  scheduled              );
+  fd_histf_sample( pack->vote_per_microblock, status1.txns_scheduled );
+
+#if FD_HAS_AVX512 && FD_PACK_USE_NON_TEMPORAL_MEMCPY
+  _mm_sfence();
+#endif
+  return scheduled;
+}
 
 ulong
 fd_pack_schedule_next_microblock( fd_pack_t *  pack,
