@@ -2517,10 +2517,328 @@ fd_pack_try_schedule_bundle( fd_pack_t  * pack,
   return retval;
 }
 
-static inline sched_return_t
-fd_pack_schedule_impl_universal( ) {
-  sched_return_t to_ret  = { .cus_scheduled = 0, .txns_scheduled = 0, .bytes_scheduled = 0 };
-  return to_ret;
+typedef struct {
+  ulong cus_scheduled;
+  ulong txns_scheduled;
+  ulong bytes_scheduled;
+  ulong cu_limit;
+  ulong cu_limit_c;
+  ulong min_cus;
+  ulong min_bytes;
+  ulong fast_path;
+  ulong skip_c;
+  ulong slow_path;
+  ulong txn_limit;
+  ulong byte_limit;
+  ulong byte_limit_c;
+  ulong write_limit_c;
+  ulong use_by_bank_cnt;
+} sched_return_univ_t;
+
+static inline sched_return_univ_t
+fd_pack_schedule_impl_universal( fd_pack_t          * pack,
+                       fd_pack_ord_txn_t  * cand,
+                       treap_rev_iter_t txn_i,
+                       ulong                cu_limit,
+                       ulong                cu_limit_c,
+                       ulong                min_cus,
+                       ulong                min_bytes,
+                       ulong                fast_path,
+                       ulong                skip_c,
+                       ulong                slow_path,
+                       ulong                txn_limit,
+                       ulong                byte_limit,
+                       ulong                byte_limit_c,
+                       ulong                write_limit_c,
+                       ulong              * written_list_cnt,
+                       ulong              * written_list_max,
+                       ulong                bank_tile,
+                       ulong              * use_by_bank_txn,
+                       ulong                use_by_bank_cnt,
+                       fd_txn_p_t         * out ) {  
+  fd_pack_ord_txn_t  * pool         = pack->pool;
+  fd_pack_addr_use_t * acct_in_use  = pack->acct_in_use;
+  fd_pack_addr_use_t * writer_costs = pack->writer_costs;
+  treap_t            * pending_txns = pack->pending;
+
+  fd_pack_addr_use_t ** written_list     = pack->written_list;
+
+  /*TODO: remove this copy since it's looping
+   * every transaction it can be expensive.*/
+  FD_PACK_BITSET_DECLARE( bitset_rw_in_use );
+  FD_PACK_BITSET_DECLARE( bitset_w_in_use  );                      
+  FD_PACK_BITSET_COPY( bitset_rw_in_use, pack->bitset_rw_in_use );
+  FD_PACK_BITSET_COPY( bitset_w_in_use,  pack->bitset_w_in_use  );
+
+  fd_pack_addr_use_t * use_by_bank     = pack->use_by_bank    [bank_tile];
+  /*ulong                use_by_bank_cnt = pack->use_by_bank_cnt[bank_tile];*/
+
+  ulong max_write_cost_per_acct = pack->lim->max_write_cost_per_acct;
+
+  ushort compressed_slot_number = pack->compressed_slot_number;
+
+  /*This will always be one.*/
+  ulong txns_scheduled  = 0UL;
+  ulong cus_scheduled   = 0UL;
+  ulong bytes_scheduled = 0UL;
+
+  ulong bank_tile_mask = 1UL << bank_tile;
+
+  /*ulong slow_path     = 0UL;*/
+  /*ulong cu_limit_c    = 0UL;*/
+  /*ulong byte_limit_c  = 0UL;*/
+  /*ulong write_limit_c = 0UL;*/
+  sched_return_univ_t to_exit = { 
+  .cus_scheduled = 0UL,
+  .txns_scheduled = 0UL,
+  .bytes_scheduled = 0UL,
+  .cu_limit = cu_limit, 
+  .cu_limit_c = cu_limit_c, 
+  .min_cus = min_cus, 
+  .min_bytes = min_bytes,
+  .fast_path = fast_path,
+  .skip_c = skip_c,
+  .slow_path = slow_path,
+  .txn_limit = txn_limit,
+  .byte_limit = byte_limit,
+  .byte_limit_c = byte_limit_c,
+  .write_limit_c = write_limit_c,
+  };
+
+
+  fd_pack_ord_txn_t * cur = cand;
+  min_cus   = fd_ulong_min( min_cus,   cur->compute_est     );
+  min_bytes = fd_ulong_min( min_bytes, cur->txn->payload_sz );
+
+  ulong conflicts = 0UL;
+
+  if( FD_UNLIKELY( cur->compute_est>cu_limit ) ){
+    cu_limit_c++;
+    return to_exit;
+  }
+  /* Likely? Unlikely? */
+  if( FD_LIKELY( !FD_PACK_BITSET_INTERSECT4_EMPTY( bitset_rw_in_use, bitset_w_in_use, cur->w_bitset, cur->rw_bitset ) ) ) {
+    fast_path++;
+    return to_exit;
+  }
+
+  if( FD_UNLIKELY( cur->skip==compressed_slot_number ) ) {
+    skip_c++;
+    return to_exit;
+  }
+    /* If skip>FD_PACK_MAX_SKIP but not compressed_slot_number, it means
+       it's the compressed slot number of a previous slot.  We don't
+       care unless we're going to update the value though, so we don't
+       need to eagerly reset it to FD_PACK_MAX_SKIP.
+       compressed_slot_number is a ushort, so it's possible for it to
+       roll over, but the transaction lifetime is much shorter than
+       that, so it won't be a problem. */
+
+    if( FD_UNLIKELY( cur->txn->payload_sz>byte_limit ) ) {
+      byte_limit_c++;
+      return to_exit;
+    }
+
+
+    fd_txn_t const * txn = TXN(cur->txn);
+    fd_acct_addr_t const * accts   = fd_txn_get_acct_addrs( txn, cur->txn->payload );
+    fd_acct_addr_t const * alt_adj = cur->txn_e->alt_accts - fd_txn_account_cnt( txn, FD_TXN_ACCT_CAT_IMM );
+    /* Check conflicts between this transaction's writable accounts and
+       current readers */
+    for( fd_txn_acct_iter_t iter=fd_txn_acct_iter_init( txn, FD_TXN_ACCT_CAT_WRITABLE );
+        iter!=fd_txn_acct_iter_end(); iter=fd_txn_acct_iter_next( iter ) ) {
+
+      fd_acct_addr_t acct = *ACCT_ITER_TO_PTR( iter );
+
+      fd_pack_addr_use_t * in_wcost_table = acct_uses_query( writer_costs, acct, NULL );
+      if( FD_UNLIKELY( in_wcost_table && in_wcost_table->total_cost+cur->compute_est > max_write_cost_per_acct ) ) {
+        /* Can't be scheduled until the next block */
+        conflicts = ULONG_MAX;
+        break;
+      }
+
+      fd_pack_addr_use_t * use = acct_uses_query( acct_in_use, acct, NULL );
+      if( FD_UNLIKELY( use ) ) conflicts |= use->in_use_by; /* break? */
+    }
+
+    if( FD_UNLIKELY( conflicts==ULONG_MAX ) ) {
+      /* The logic for how to adjust skip is a bit complicated, and we
+         want to do it branchlessly. Let psc=FD_PACK_SKIP_CNT,
+           Before                   After
+             1               compressed_slot_number
+           x in [2, psc]             x-1
+           x where x>psc            psc-1
+
+         Set A=min(x, 5), B=min(A-2, compressed_slot_number-1), and
+         note that compressed_slot_number is in [psc+1, USHORT_MAX].
+         Then:
+             x                A     A-2          B      B+1
+             1                1  USHORT_MAX    csn-1    csn
+           x in [2, psc]      x     x-2         x-2     x-1
+           x where x>psc     psc   psc-2       psc-2   psc-1
+         So B+1 is the desired value. */
+      cur->skip = (ushort)(1+fd_ushort_min( (ushort)(compressed_slot_number-1),
+                                            (ushort)(fd_ushort_min( cur->skip, FD_PACK_SKIP_CNT )-2) ) );
+      write_limit_c++;
+      return to_exit;
+    }
+
+    if( FD_UNLIKELY( conflicts ) ) {
+      slow_path++;
+      return to_exit;
+    }
+  /* Check conflicts between this transaction's readonly accounts and
+     current writers */
+  for( fd_txn_acct_iter_t iter=fd_txn_acct_iter_init( txn, FD_TXN_ACCT_CAT_READONLY );
+      iter!=fd_txn_acct_iter_end(); iter=fd_txn_acct_iter_next( iter ) ) {
+
+    fd_acct_addr_t const * acct = ACCT_ITER_TO_PTR( iter );
+    if( fd_pack_unwritable_contains( acct ) ) continue; /* No need to track sysvars because they can't be writable */
+
+    fd_pack_addr_use_t * use = acct_uses_query( acct_in_use,  *acct, NULL );
+    if( use ) conflicts |= (use->in_use_by & FD_PACK_IN_USE_WRITABLE) ? use->in_use_by : 0UL;
+  }
+
+  if( FD_UNLIKELY( conflicts ) ) {
+    slow_path++;
+    return to_exit;
+  } 
+
+ /* Include this transaction in the microblock! */
+  FD_PACK_BITSET_OR( bitset_rw_in_use, cur->rw_bitset );
+  FD_PACK_BITSET_OR( bitset_w_in_use,  cur->w_bitset  );
+
+  if(
+#if FD_HAS_AVX512 && FD_PACK_USE_NON_TEMPORAL_MEMCPY
+        FD_LIKELY( cur->txn->payload_sz>=1024UL )
+#else
+        0
+#endif
+      ) {
+#if FD_HAS_AVX512 && FD_PACK_USE_NON_TEMPORAL_MEMCPY
+      _mm512_stream_si512( (void*)(out->payload+   0UL), _mm512_load_epi64( cur->txn->payload+   0UL ) );
+      _mm512_stream_si512( (void*)(out->payload+  64UL), _mm512_load_epi64( cur->txn->payload+  64UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 128UL), _mm512_load_epi64( cur->txn->payload+ 128UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 192UL), _mm512_load_epi64( cur->txn->payload+ 192UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 256UL), _mm512_load_epi64( cur->txn->payload+ 256UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 320UL), _mm512_load_epi64( cur->txn->payload+ 320UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 384UL), _mm512_load_epi64( cur->txn->payload+ 384UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 448UL), _mm512_load_epi64( cur->txn->payload+ 448UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 512UL), _mm512_load_epi64( cur->txn->payload+ 512UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 576UL), _mm512_load_epi64( cur->txn->payload+ 576UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 640UL), _mm512_load_epi64( cur->txn->payload+ 640UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 704UL), _mm512_load_epi64( cur->txn->payload+ 704UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 768UL), _mm512_load_epi64( cur->txn->payload+ 768UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 832UL), _mm512_load_epi64( cur->txn->payload+ 832UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 896UL), _mm512_load_epi64( cur->txn->payload+ 896UL ) );
+      _mm512_stream_si512( (void*)(out->payload+ 960UL), _mm512_load_epi64( cur->txn->payload+ 960UL ) );
+      _mm512_stream_si512( (void*)(out->payload+1024UL), _mm512_load_epi64( cur->txn->payload+1024UL ) );
+      _mm512_stream_si512( (void*)(out->payload+1088UL), _mm512_load_epi64( cur->txn->payload+1088UL ) );
+      _mm512_stream_si512( (void*)(out->payload+1152UL), _mm512_load_epi64( cur->txn->payload+1152UL ) );
+      _mm512_stream_si512( (void*)(out->payload+1216UL), _mm512_load_epi64( cur->txn->payload+1216UL ) );
+      /* Copied out to 1280 bytes, which copies some other fields we needed to
+         copy anyway. */
+      FD_STATIC_ASSERT( offsetof(fd_txn_p_t, payload_sz     )+sizeof(((fd_txn_p_t*)NULL)->payload_sz    )<=1280UL, nt_memcpy );
+      FD_STATIC_ASSERT( offsetof(fd_txn_p_t, blockhash_slot )+sizeof(((fd_txn_p_t*)NULL)->blockhash_slot)<=1280UL, nt_memcpy );
+      FD_STATIC_ASSERT( offsetof(fd_txn_p_t, scheduler_arrival_time_nanos )+sizeof(((fd_txn_p_t*)NULL)->scheduler_arrival_time_nanos )<=1280UL, nt_memcpy );
+      FD_STATIC_ASSERT( offsetof(fd_txn_p_t, source_tpu     )+sizeof(((fd_txn_p_t*)NULL)->source_tpu    )<=1280UL, nt_memcpy );
+      FD_STATIC_ASSERT( offsetof(fd_txn_p_t, source_ipv4    )+sizeof(((fd_txn_p_t*)NULL)->source_ipv4   )<=1280UL, nt_memcpy );
+      FD_STATIC_ASSERT( offsetof(fd_txn_p_t, flags          )+sizeof(((fd_txn_p_t*)NULL)->flags         )<=1280UL, nt_memcpy );
+      FD_STATIC_ASSERT( offsetof(fd_txn_p_t, _              )                                            <=1280UL, nt_memcpy );
+      const ulong offset_into_txn = 1280UL - offsetof(fd_txn_p_t, _ );
+      fd_memcpy( offset_into_txn+(uchar *)TXN(out), offset_into_txn+(uchar const *)txn,
+          fd_ulong_max( offset_into_txn, fd_txn_footprint( txn->instr_cnt, txn->addr_table_lookup_cnt ) )-offset_into_txn );
+#endif
+    } else {
+      fd_memcpy( out->payload, cur->txn->payload, cur->txn->payload_sz                                           );
+      fd_memcpy( TXN(out),     txn,               fd_txn_footprint( txn->instr_cnt, txn->addr_table_lookup_cnt ) );
+      out->payload_sz                      = cur->txn->payload_sz;
+      out->pack_cu.requested_exec_plus_acct_data_cus = cur->txn->pack_cu.requested_exec_plus_acct_data_cus;
+      out->pack_cu.non_execution_cus       = cur->txn->pack_cu.non_execution_cus;
+      out->scheduler_arrival_time_nanos    = cur->txn->scheduler_arrival_time_nanos;
+      out->source_tpu                      = cur->txn->source_tpu;
+      out->source_ipv4                     = cur->txn->source_ipv4;
+      out->flags                           = cur->txn->flags;
+    }
+    out++;
+    for( fd_txn_acct_iter_t iter=fd_txn_acct_iter_init( txn, FD_TXN_ACCT_CAT_WRITABLE );
+        iter!=fd_txn_acct_iter_end(); iter=fd_txn_acct_iter_next( iter ) ) {
+      fd_acct_addr_t acct_addr = *ACCT_ITER_TO_PTR( iter );
+
+      fd_pack_addr_use_t * in_wcost_table = acct_uses_query( writer_costs, acct_addr, NULL );
+      if( !in_wcost_table ) {
+        in_wcost_table = acct_uses_insert( writer_costs, acct_addr );
+        in_wcost_table->total_cost = 0UL;
+        written_list[ *written_list_cnt ] = in_wcost_table;
+        *written_list_cnt = fd_ulong_min( *written_list_cnt+1UL, (*written_list_max)-1UL );
+      }
+      in_wcost_table->total_cost += cur->compute_est;
+
+      fd_pack_addr_use_t * use = acct_uses_insert( acct_in_use, acct_addr );
+      use->in_use_by = bank_tile_mask | FD_PACK_IN_USE_WRITABLE;
+
+      use_by_bank[use_by_bank_cnt++] = *use;
+
+      /* If there aren't any more references to this account in the
+         heap, it can't cause any conflicts.  That means we actually
+         don't need to record that we are using it, which is good
+         because we want to release the bit. */
+      release_result_t ret = release_bit_reference( pack, &acct_addr );
+      FD_PACK_BITSET_CLEARN( bitset_rw_in_use, ret.clear_rw_bit );
+      FD_PACK_BITSET_CLEARN( bitset_w_in_use,  ret.clear_w_bit  );
+    }
+
+    for( fd_txn_acct_iter_t iter=fd_txn_acct_iter_init( txn, FD_TXN_ACCT_CAT_READONLY );
+        iter!=fd_txn_acct_iter_end(); iter=fd_txn_acct_iter_next( iter ) ) {
+
+      fd_acct_addr_t acct_addr = *ACCT_ITER_TO_PTR( iter );
+
+      if( fd_pack_unwritable_contains( &acct_addr ) ) continue; /* No need to track sysvars because they can't be writable */
+
+      fd_pack_addr_use_t * use = acct_uses_query( acct_in_use,  acct_addr, NULL );
+      if( !use ) { use = acct_uses_insert( acct_in_use, acct_addr ); use->in_use_by = 0UL; }
+
+      if( !(use->in_use_by & bank_tile_mask) ) use_by_bank[use_by_bank_cnt++] = *use;
+      use->in_use_by |= bank_tile_mask;
+      use->in_use_by &= ~FD_PACK_IN_USE_BIT_CLEARED;
+
+
+      release_result_t ret = release_bit_reference( pack, &acct_addr );
+      FD_PACK_BITSET_CLEARN( bitset_rw_in_use, ret.clear_rw_bit );
+      FD_PACK_BITSET_CLEARN( bitset_w_in_use,  ret.clear_w_bit  );
+    }
+  FD_PACK_BITSET_COPY( pack->bitset_rw_in_use, bitset_rw_in_use );
+  FD_PACK_BITSET_COPY( pack->bitset_w_in_use,  bitset_w_in_use  );
+  txns_scheduled  += 1UL;                      txn_limit       -= 1UL;
+  cus_scheduled   += cur->compute_est;         cu_limit        -= cur->compute_est;
+  bytes_scheduled += cur->txn->payload_sz;     byte_limit      -= cur->txn->payload_sz;
+
+  *(use_by_bank_txn++) = use_by_bank_cnt;
+  if( FD_UNLIKELY( cur->txn->flags & FD_TXN_P_FLAGS_DURABLE_NONCE ) ) noncemap_ele_remove_fast( pack->noncemap, cur, pack->pool );
+  sig2txn_ele_remove_fast( pack->signature_map, cur, pool );
+
+  cur->root = FD_ORD_TXN_ROOT_FREE;
+  expq_remove( pack->expiration_q, cur->expq_idx );
+  treap_idx_remove( pending_txns, txn_i, pool );
+  trp_pool_idx_release( pool, txn_i );
+  pack->pending_txn_cnt--;
+  sched_return_univ_t to_return = { 
+   .cus_scheduled=cus_scheduled,
+   .txns_scheduled=txns_scheduled,
+   .bytes_scheduled=bytes_scheduled,
+   .cu_limit = cu_limit, 
+   .cu_limit_c = cu_limit_c, 
+   .min_cus = min_cus, 
+   .min_bytes = min_bytes,
+   .fast_path = fast_path,
+   .skip_c = skip_c,
+   .slow_path = slow_path,
+   .txn_limit = txn_limit,
+   .byte_limit = byte_limit,
+   .byte_limit_c = byte_limit_c,
+   .write_limit_c = write_limit_c,
+  };
+  return to_return;
 }
 
 static inline int 
@@ -2812,7 +3130,8 @@ ulong fd_pack_schedule_next_microblock_universal( fd_pack_t * pack,
   ulong cu_limit = total_cus - vote_cus;
   ulong txn_limit = pack->lim->max_txn_per_microblock - vote_reserved_txns;
   ulong byte_limit = pack->lim->max_data_bytes_per_block - pack->data_bytes_consumed - MICROBLOCK_DATA_OVERHEAD;
- sched_return_t status = {0}, status1 = {0};
+ sched_return_univ_t status = {0};
+ sched_return_t status1 = {0};
 
   if( FD_LIKELY( schedule_flags & FD_PACK_SCHEDULE_VOTE ) ) {
     /* Schedule vote transactions */
@@ -2828,10 +3147,41 @@ ulong fd_pack_schedule_next_microblock_universal( fd_pack_t * pack,
     txn_limit += vote_reserved_txns - status1.txns_scheduled;
     cu_limit  += vote_cus - status1.cus_scheduled;
   }
+  /*Originally this logic was in the normal transaction scheduling 
+   * function but we are putting it before iterating over the treap
+   * as  there is not benefit to traversing the treap if the smallest
+   * transaction cannot fit in the block.
+   * NOTE: For now pending_smallest does not consider bundle in it's 
+   * calculation, technically it's possible a bundle have a smaller total CU
+   * than a normal txn but it is less likely therefore will be implemented in 
+   * the future.*/
+  ulong to_skip = 0;
+ if( FD_UNLIKELY( (cu_limit<pack->pending_smallest->cus) | (txn_limit==0UL) | (byte_limit<pack->pending_smallest->bytes) ) ) {
+    to_skip = 1; 
+  }
+
+  /*Since we iterate over the treap we need to put
+   * this outside the schedule function as that only
+   * handles a single txn but rw set needs to track multiple.*/
+  /*FD_PACK_BITSET_DECLARE( bitset_rw_in_use_reg_txn );*/
+  /*FD_PACK_BITSET_DECLARE( bitset_w_in_use_reg_txn  );*/
+  ulong min_cus_reg_txn   = ULONG_MAX;
+  ulong min_bytes_reg_txn = ULONG_MAX;
+  ulong cu_limit_c        = 0UL;
+  ulong fast_path         = 0UL;
+  ulong skip_c            = 0UL;
+  ulong slow_path         = 0UL;
+  ulong byte_limit_c      = 0UL;
+  ulong write_limit_c     = 0UL;
+  ulong txns_scheduled    = 0UL;
+  ulong written_list_cnt  = pack->written_list_cnt;
+  ulong written_list_max  = pack->written_list_max;
+  /*fd_pack_addr_use_t * use_by_bank     = pack->use_by_bank    [bank_tile];*/
+  ulong                use_by_bank_cnt = pack->use_by_bank_cnt[bank_tile];
 
   fd_pack_ord_txn_t  * pool         = pack->pool;
   treap_rev_iter_t next_txn = treap_idx_null();
-  for( treap_rev_iter_t txn_i=treap_rev_iter_init( pack->pending, pool ); !treap_rev_iter_done( txn_i); txn_i=next_txn ){
+  for( treap_rev_iter_t txn_i=treap_rev_iter_init( pack->pending, pool ); !to_skip && !treap_rev_iter_done( txn_i); txn_i=next_txn ){
     next_txn = treap_rev_iter_next( txn_i, pool );
     fd_pack_ord_txn_t * candidate_txn = treap_rev_iter_ele( txn_i, pool );
     ulong txn_type = candidate_txn->txn_type_bitset;
@@ -2845,15 +3195,49 @@ ulong fd_pack_schedule_next_microblock_universal( fd_pack_t * pack,
       if( FD_UNLIKELY( bundle_result==TRY_BUNDLE_HAS_CONFLICTS ) ) return 0UL;
     }
     /* Fill any remaining space with non-vote transactions */
-  if( FD_LIKELY( (schedule_flags & FD_PACK_SCHEDULE_TXN) && (txn_type & FD_PACK_ORD_TXN_TYPE_TXN) ) ) {
-    status = fd_pack_schedule_impl_universal(); 
-    scheduled                   += status.txns_scheduled;
-    pack->cumulative_block_cost += status.cus_scheduled;
-    pack->data_bytes_consumed   += status.bytes_scheduled;
+    if( FD_LIKELY( (schedule_flags & FD_PACK_SCHEDULE_TXN) && (txn_type & FD_PACK_ORD_TXN_TYPE_TXN) ) ) {
+      status = fd_pack_schedule_impl_universal( pack, candidate_txn, txn_i, cu_limit, cu_limit_c, fast_path, skip_c, slow_path, min_cus_reg_txn, min_bytes_reg_txn, txn_limit, byte_limit, byte_limit_c, write_limit_c, &written_list_cnt, &written_list_max, bank_tile, use_by_bank_txn, use_by_bank_cnt, out+scheduled ); 
+      scheduled                   += status.txns_scheduled;
+      txns_scheduled              += status.txns_scheduled;
+      pack->cumulative_block_cost += status.cus_scheduled;
+      pack->data_bytes_consumed   += status.bytes_scheduled;
+
+      cu_limit            = status.cu_limit;
+      cu_limit_c          = status.cu_limit_c;
+      min_cus_reg_txn     = status.min_cus;
+      min_bytes_reg_txn   = status.min_bytes;
+      fast_path           = status.fast_path;
+      skip_c              = status.skip_c;
+      slow_path           = status.slow_path;
+      txn_limit           = status.txn_limit;
+      byte_limit          = status.byte_limit;
+      byte_limit_c        = status.byte_limit_c;
+      write_limit_c       = status.write_limit_c;
+      use_by_bank_cnt     = status.use_by_bank_cnt;
+
     }
 
   }
+  if( FD_LIKELY( (schedule_flags & FD_PACK_SCHEDULE_TXN) ) ){ 
+    FD_MCNT_INC( PACK, TRANSACTION_SCHEDULE_TAKEN,      txns_scheduled );
+    FD_MCNT_INC( PACK, TRANSACTION_SCHEDULE_CU_LIMIT,   cu_limit_c     );
+    FD_MCNT_INC( PACK, TRANSACTION_SCHEDULE_FAST_PATH,  fast_path      );
+    FD_MCNT_INC( PACK, TRANSACTION_SCHEDULE_BYTE_LIMIT, byte_limit_c   );
+    FD_MCNT_INC( PACK, TRANSACTION_SCHEDULE_WRITE_COST, write_limit_c  );
+    FD_MCNT_INC( PACK, TRANSACTION_SCHEDULE_SLOW_PATH,  slow_path      );
+    FD_MCNT_INC( PACK, TRANSACTION_SCHEDULE_DEFER_SKIP, skip_c         );
+    /* If we scanned the whole treap and didn't break early, we now have a
+       better estimate of the smallest. */
+    if( FD_UNLIKELY( treap_rev_iter_done( next_txn ) ) ) {
+      pack->pending_smallest->cus   = min_cus_reg_txn;
+      pack->pending_smallest->bytes = min_bytes_reg_txn;
+    }
+  pack->use_by_bank_cnt[bank_tile] = use_by_bank_cnt;
+  /*FD_PACK_BITSET_COPY( pack->bitset_rw_in_use, bitset_rw_in_use_reg_txn );*/
+  /*FD_PACK_BITSET_COPY( pack->bitset_w_in_use,  bitset_w_in_use_reg_txn  );*/
 
+  pack->written_list_cnt = written_list_cnt;
+  }
   ulong nonempty = (ulong)(scheduled>0UL);
   pack->microblock_cnt              += nonempty;
   pack->outstanding_microblock_mask |= nonempty << bank_tile;
