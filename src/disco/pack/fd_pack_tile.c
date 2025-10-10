@@ -698,7 +698,7 @@ after_credit( fd_pack_ctx_t *     ctx,
 
     fd_txn_p_t * microblock_dst = fd_chunk_to_laddr( ctx->bank_out_mem, ctx->bank_out_chunk );
     long schedule_duration = -fd_tickcount();
-    ulong schedule_cnt = fd_pack_schedule_next_microblock( ctx->pack, CUS_PER_MICROBLOCK, VOTE_FRACTION, (ulong)i, flags, microblock_dst );
+    ulong schedule_cnt = fd_pack_schedule_next_microblock_universal( ctx->pack, CUS_PER_MICROBLOCK, VOTE_FRACTION, (ulong)i, flags, microblock_dst );
     schedule_duration      += fd_tickcount();
     fd_histf_sample( (schedule_cnt>0UL) ? ctx->schedule_duration : ctx->no_sched_duration, (ulong)schedule_duration );
 

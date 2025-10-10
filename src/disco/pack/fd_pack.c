@@ -3105,7 +3105,8 @@ fd_pack_schedule_bundle_universal( fd_pack_t          * pack,
   return retval;
 }
 
-ulong fd_pack_schedule_next_microblock_universal( fd_pack_t * pack,
+ulong
+fd_pack_schedule_next_microblock_universal( fd_pack_t * pack,
                                                   ulong       total_cus,
                                                   float       vote_fraction,
                                                   ulong       bank_tile,

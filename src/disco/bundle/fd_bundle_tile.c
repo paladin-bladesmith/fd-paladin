@@ -129,6 +129,7 @@ fd_bundle_tile_publish_block_engine_update(
       0UL, /* seq */
       tspub
   );
+  FD_LOG_WARNING(( "Bundle Received Here"));
   ctx->plugin_out.chunk = fd_dcache_compact_next( ctx->plugin_out.chunk, sizeof(fd_plugin_msg_block_engine_update_t), ctx->plugin_out.chunk0, ctx->plugin_out.wmark );
 }
 
