@@ -96,6 +96,7 @@ struct fd_topo_net_tile {
   uint  bind_address;
 
   ushort shred_listen_port;
+  ushort priority_transaction_listen_port;
   ushort quic_transaction_listen_port;
   ushort legacy_transaction_listen_port;
   ushort gossip_listen_port;

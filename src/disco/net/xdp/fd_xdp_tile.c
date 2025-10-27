@@ -203,6 +203,7 @@ typedef struct {
   uint   default_address;
   uint   bind_address;
   ushort shred_listen_port;
+  ushort priority_transaction_listen_port;
   ushort quic_transaction_listen_port;
   ushort legacy_transaction_listen_port;
   ushort gossip_listen_port;
@@ -701,6 +702,7 @@ before_frag( fd_net_ctx_t * ctx,
     ctx->metrics.tx_full_fail_cnt++;
     return 1;
   }
+  /*FD_LOG_WARNING(( "During Frag IPv4: %u.%u.%u.%u", FD_IP4_ADDR_FMT_ARGS( ctx->tx_op.gre_outer_dst_ip ) ) );*/
 
   /* Allocate buffer for receive */
 
@@ -848,6 +850,7 @@ after_frag( fd_net_ctx_t *      ctx,
     FD_STORE( ushort, iphdr+10, fd_ip4_hdr_check( iphdr ) );
   }
 
+  FD_LOG_WARNING(( "IPv4: %u.%u.%u.%u", FD_IP4_ADDR_FMT_ARGS( ip4_saddr ) ) );
   /* Submit packet TX job
 
      Invariant for ring_tx: prod-cons<length
@@ -953,6 +956,13 @@ net_rx_packet( fd_net_ctx_t * ctx,
   ushort udp_dstport     = fd_ushort_bswap( udp_hdr->net_dport );
 
   FD_DTRACE_PROBE_4( net_tile_pkt_rx, ip_srcaddr, udp_srcport, udp_dstport, sz );
+  
+  if(udp_dstport==ctx->priority_transaction_listen_port &&
+      ip_srcaddr!= 0x7F000001){
+  FD_LOG_WARNING(( "BLOCKED IPv4: %u.%u.%u.%u:%u but prio on: %u", FD_IP4_ADDR_FMT_ARGS( ip_srcaddr ), udp_dstport, ctx->priority_transaction_listen_port ) );
+    return;
+  }
+  FD_LOG_WARNING(( "During Frag IPv4: %u.%u.%u.%u:%u but prio on: %u", FD_IP4_ADDR_FMT_ARGS( ip_srcaddr ), udp_dstport, ctx->priority_transaction_listen_port ) );
 
   /* Route packet to downstream tile */
   ushort proto;
@@ -963,7 +973,7 @@ net_rx_packet( fd_net_ctx_t * ctx,
   } else if( FD_UNLIKELY( udp_dstport==ctx->quic_transaction_listen_port ) ) {
     proto = DST_PROTO_TPU_QUIC;
     out = ctx->quic_out;
-  } else if( FD_UNLIKELY( udp_dstport==ctx->legacy_transaction_listen_port ) ) {
+  } else if( FD_UNLIKELY( udp_dstport==ctx->legacy_transaction_listen_port || udp_dstport==ctx->priority_transaction_listen_port ) ) {
     proto = DST_PROTO_TPU_UDP;
     out = ctx->quic_out;
   } else if( FD_UNLIKELY( udp_dstport==ctx->gossip_listen_port ) ) {
@@ -1312,6 +1322,7 @@ privileged_init( fd_topo_t *      topo,
     ushort udp_port_candidates[] = {
       (ushort)tile->xdp.net.legacy_transaction_listen_port,
       (ushort)tile->xdp.net.quic_transaction_listen_port,
+      (ushort)tile->xdp.net.priority_transaction_listen_port,
       (ushort)tile->xdp.net.shred_listen_port,
       (ushort)tile->xdp.net.gossip_listen_port,
       (ushort)tile->xdp.net.repair_intake_listen_port,
@@ -1390,6 +1401,7 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->bind_address                   = tile->net.bind_address;
   ctx->shred_listen_port              = tile->net.shred_listen_port;
   ctx->quic_transaction_listen_port   = tile->net.quic_transaction_listen_port;
+  ctx->priority_transaction_listen_port   = tile->net.priority_transaction_listen_port;
   ctx->legacy_transaction_listen_port = tile->net.legacy_transaction_listen_port;
   ctx->gossip_listen_port             = tile->net.gossip_listen_port;
   ctx->repair_intake_listen_port      = tile->net.repair_intake_listen_port;

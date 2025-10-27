@@ -346,6 +346,7 @@ struct fd_config {
     struct {
       ushort regular_transaction_listen_port;
       ushort quic_transaction_listen_port;
+      ushort priority_transaction_listen_port;
 
       uint txn_reassembly_count;
       uint max_concurrent_connections;
@@ -355,6 +356,8 @@ struct fd_config {
       int  retry;
 
       char ssl_key_log_file[ PATH_MAX ];
+      ulong ip_allow_cnt;
+      char ip_allow[ 3 ][ 16 ]; 
     } quic;
 
     struct {
