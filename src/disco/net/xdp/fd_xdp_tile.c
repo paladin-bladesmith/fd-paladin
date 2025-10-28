@@ -850,7 +850,7 @@ after_frag( fd_net_ctx_t *      ctx,
     FD_STORE( ushort, iphdr+10, fd_ip4_hdr_check( iphdr ) );
   }
 
-  FD_LOG_WARNING(( "IPv4: %u.%u.%u.%u", FD_IP4_ADDR_FMT_ARGS( ip4_saddr ) ) );
+  /*FD_LOG_WARNING(( "IPv4: %u.%u.%u.%u", FD_IP4_ADDR_FMT_ARGS( ip4_saddr ) ) );*/
   /* Submit packet TX job
 
      Invariant for ring_tx: prod-cons<length
@@ -957,12 +957,12 @@ net_rx_packet( fd_net_ctx_t * ctx,
 
   FD_DTRACE_PROBE_4( net_tile_pkt_rx, ip_srcaddr, udp_srcport, udp_dstport, sz );
   
-  if(udp_dstport==ctx->priority_transaction_listen_port &&
-      ip_srcaddr!= 0x7F000001){
-  FD_LOG_WARNING(( "BLOCKED IPv4: %u.%u.%u.%u:%u but prio on: %u", FD_IP4_ADDR_FMT_ARGS( ip_srcaddr ), udp_dstport, ctx->priority_transaction_listen_port ) );
-    return;
-  }
-  FD_LOG_WARNING(( "During Frag IPv4: %u.%u.%u.%u:%u but prio on: %u", FD_IP4_ADDR_FMT_ARGS( ip_srcaddr ), udp_dstport, ctx->priority_transaction_listen_port ) );
+  /*if(udp_dstport==ctx->priority_transaction_listen_port &&*/
+  /*    ip_srcaddr!= 0x7F000001){*/
+  /*FD_LOG_WARNING(( "BLOCKED IPv4: %u.%u.%u.%u:%u but prio on: %u", FD_IP4_ADDR_FMT_ARGS( ip_srcaddr ), udp_dstport, ctx->priority_transaction_listen_port ) );*/
+  /*  return;*/
+  /*}*/
+  /*FD_LOG_WARNING(( "During Frag IPv4: %u.%u.%u.%u:%u but prio on: %u", FD_IP4_ADDR_FMT_ARGS( ip_srcaddr ), udp_dstport, ctx->priority_transaction_listen_port ) );*/
 
   /* Route packet to downstream tile */
   ushort proto;

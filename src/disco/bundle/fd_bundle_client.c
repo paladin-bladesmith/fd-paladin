@@ -303,6 +303,7 @@ fd_bundle_client_send_ping( fd_bundle_tile_t * ctx ) {
 int
 fd_bundle_client_step_reconnect( fd_bundle_tile_t * ctx,
                                  long               now ) {
+  /*FD_LOG_WARNING(( "ENTER" ));*/
   /* Drive auth */
   if( FD_UNLIKELY( ctx->auther.needs_poll ) ) {
     fd_bundle_auther_poll( &ctx->auther, ctx->grpc_client, ctx->keyguard_client );
@@ -310,11 +311,13 @@ fd_bundle_client_step_reconnect( fd_bundle_tile_t * ctx,
   }
   if( FD_UNLIKELY( ctx->auther.state!=FD_BUNDLE_AUTH_STATE_DONE_WAIT ) ) return 0;
 
+    /*FD_LOG_WARNING(( "ABOUT TO REQ BLDRINFO" ));*/
   /* Request block builder info */
   int const builder_info_expired = ( ctx->builder_info_valid_until - now )<0;
   if( FD_UNLIKELY( ( ( !ctx->builder_info_avail ) |
                      ( !builder_info_expired    ) ) &
                    ( !ctx->builder_info_wait      ) ) ) {
+    FD_LOG_WARNING(( "KEEP REQ BLDRINFO %i", builder_info_expired ));
     fd_bundle_client_request_builder_info( ctx );
     return 1;
   }
@@ -506,15 +509,8 @@ fd_bundle_tile_publish_bundle_txn(
       .commission     = (uchar)ctx->builder_commission
     },
   };
-  if( FD_UNLIKELY( !fd_memeq( ctx->builder_pubkey, EMPTY_KEY , 32 ) ) ){
-    memcpy( txnm->block_engine.commission_pubkey, ctx->builder_pubkey, 32UL );
-    FD_LOG_WARNING(( "Setting BE commission_pubkey to: %s",  FD_BASE58_ENC_32_ALLOCA( ctx->builder_pubkey ))); 
-    FD_LOG_WARNING(( "builder pubkey does not match default: %i ", !fd_memeq( ctx->builder_pubkey, EMPTY_KEY, 32 ) ));
-  } else {
-    memcpy( txnm->block_engine.commission_pubkey, COM_KEY, 32);
 
-    FD_LOG_WARNING(( "Setting fallback commission_pubkey to: %s",  FD_BASE58_ENC_32_ALLOCA( COM_KEY ))); 
-  }
+  memcpy( txnm->block_engine.commission_pubkey, ctx->builder_pubkey, 32UL );
   fd_memcpy( fd_txn_m_payload( txnm ), txn, txn_sz );
 
   ulong sz  = fd_txn_m_realized_footprint( txnm, 0, 0 );
@@ -797,15 +793,24 @@ fd_bundle_client_handle_builder_fee_info(
   ctx->builder_commission = (uchar)res.commission;
   if( FD_UNLIKELY( !fd_memeq( res.pubkey, EMPTY_KEY, 45 )  ) ){
     if( FD_UNLIKELY( !fd_base58_decode_32( res.pubkey, ctx->builder_pubkey ) ) ) {
-      FD_LOG_WARNING(( "BLOCKBUILDERINFO: %i | comm: %i", !fd_memeq( res.pubkey, EMPTY_KEY, 45 ), ctx->builder_commission ));
+      /*FD_LOG_WARNING(( "BLOCKBUILDERINFO: %i | comm: %i", !fd_memeq( res.pubkey, EMPTY_KEY, 45 ), ctx->builder_commission ));*/
       FD_LOG_HEXDUMP_WARNING(( "Invalid pubkey in BlockBuilderFeeInfoResponse", res.pubkey, strnlen( res.pubkey, sizeof(res.pubkey) ) ));
       return;
     }
+  }
+  if( FD_UNLIKELY( !fd_memeq( ctx->builder_pubkey, EMPTY_KEY , 32 ) ) ){
+    FD_LOG_WARNING(( "Setting BE commission_pubkey to: %s",  FD_BASE58_ENC_32_ALLOCA( ctx->builder_pubkey ))); 
+    FD_LOG_WARNING(( "builder pubkey does not match default: %i ", !fd_memeq( ctx->builder_pubkey, EMPTY_KEY, 32 ) ));
+  } else {
+    memcpy( ctx->builder_pubkey, COM_KEY, 32);
+
+    FD_LOG_WARNING(( "Setting fallback commission_pubkey to: %s",  FD_BASE58_ENC_32_ALLOCA( COM_KEY ))); 
   }
 
   long validity_duration_ns = (long)( 60e9 * 5. ); /* 5 minutes */
   ctx->builder_info_avail = 1;
   ctx->builder_info_valid_until = fd_bundle_now() + validity_duration_ns;
+  FD_LOG_WARNING(( "SETB: %u %li", ctx->builder_info_avail, ctx->builder_info_valid_until ));
 }
 
 static void
