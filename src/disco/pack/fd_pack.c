@@ -1,5 +1,7 @@
 #define FD_UNALIGNED_ACCESS_STYLE 0
 #include "fd_pack.h"
+#include "../../ballet/base64/fd_base64.h"
+#include "../../ballet/base58/fd_base58.h"
 #include "fd_pack_cost.h"
 #include "fd_pack_bitset.h"
 #include "fd_pack_unwritable.h"
@@ -65,6 +67,15 @@ struct fd_pack_private_ord_txn {
                                                        to be on the same double cache line pair */
                rewards;     /* in Lamports */
   uint         compute_est; /* in compute units */
+  ulong        idx;
+  ulong        bundle_idx;
+  /*uchar        txn_type;*/
+  /*Rather than finding the bundle's first transaction in the bundle treap and then
+   * traversing the treap from there it is simpler to just have each transaction in
+   * the bundle just point to the next one, the last transaction in the bundle will
+   * have this value as NULL. */
+  struct fd_pack_private_ord_txn * _next;
+  struct fd_pack_private_ord_txn * _prev;
 
   /* The treap fields */
   ushort left;
@@ -647,6 +658,7 @@ FD_STATIC_ASSERT( offsetof(fd_pack_t, pending_txn_cnt)==FD_PACK_PENDING_TXN_CNT_
 /* Forward-declare some helper functions */
 static ulong delete_transaction( fd_pack_t * pack, fd_pack_ord_txn_t * txn, int delete_full_bundle, int move_from_penalty_treap );
 static inline void insert_bundle_impl( fd_pack_t * pack, ulong bundle_idx, ulong txn_cnt, fd_pack_ord_txn_t * * bundle, ulong expires_at );
+static inline ulong extract_tips_from_packet( fd_pack_ord_txn_t * ord );
 
 FD_FN_PURE ulong
 fd_pack_footprint( ulong                    pack_depth,
@@ -904,6 +916,8 @@ fd_pack_estimate_rewards_and_compute( fd_txn_e_t        * txne,
   ulong priority_rewards;
   ulong precompile_sigs;
   ulong requested_loaded_accounts_data_cost;
+  
+  /*fd_pack_ord_txn_t * ord = (fd_pack_ord_txn_t *)txne;*/
   ulong cost_estimate = fd_pack_compute_cost( txn, txne->txnp->payload, &txne->txnp->flags, &requested_execution_cus, &priority_rewards, &precompile_sigs, &requested_loaded_accounts_data_cost );
 
   if( FD_UNLIKELY( !cost_estimate ) ) return 0;
@@ -1261,6 +1275,11 @@ fd_pack_insert_txn_fini( fd_pack_t  * pack,
   *delete_cnt = 0UL;
 
   fd_pack_ord_txn_t * ord = (fd_pack_ord_txn_t *)txne;
+  /*ord->txn_cnt = 1UL;*/
+  ord->idx = ULONG_MAX;
+  ord->_next = NULL;
+  ord->_prev = NULL;
+  ord->bundle_idx = ULONG_MAX;
 
   fd_txn_t * txn   = TXN(txne->txnp);
   uchar * payload  = txne->txnp->payload;
@@ -1393,8 +1412,6 @@ fd_pack_insert_bundle_cancel( fd_pack_t          * pack,
 /* Explained below */
 #define BUNDLE_L_PRIME 37896771UL
 #define BUNDLE_N       312671UL
-#define RC_TO_REL_BUNDLE_IDX( r, c ) (BUNDLE_N - ((ulong)(r) * 1UL<<32)/((ulong)(c) * BUNDLE_L_PRIME))
-
 int
 fd_pack_insert_bundle_fini( fd_pack_t          * pack,
                             fd_txn_e_t * const * bundle,
@@ -1459,6 +1476,7 @@ fd_pack_insert_bundle_fini( fd_pack_t          * pack,
       if( FD_LIKELY( same_nonce ) ) {
         /* bundles take priority over non-bundles, and earlier bundles
            take priority over later bundles. */
+        FD_LOG_WARNING(( "same nonce" ));
         if( FD_UNLIKELY( same_nonce->txn->flags & FD_TXN_P_FLAGS_BUNDLE ) ) {
           err = FD_PACK_INSERT_REJECT_NONCE_PRIORITY;
           break;
@@ -1486,7 +1504,7 @@ fd_pack_insert_bundle_fini( fd_pack_t          * pack,
     int is_ib = !!(cur->txn->flags & FD_TXN_P_FLAGS_INITIALIZER_BUNDLE);
 
     /* Delete the previous IB if there is one */
-    if( FD_UNLIKELY( is_ib && 0UL==RC_TO_REL_BUNDLE_IDX( cur->rewards, cur->compute_est ) ) ) {
+    if( FD_UNLIKELY( is_ib && 0UL==cur->bundle_idx ) ) {
       ulong _delete_cnt = delete_transaction( pack, cur, 1, 0 );
       *delete_cnt += _delete_cnt;
     }
@@ -1527,108 +1545,6 @@ fd_pack_insert_bundle_fini( fd_pack_t          * pack,
     }
   }
 
-  /* We put bundles in a treap just like all the other transactions, but
-     we actually want to sort them in a very specific order; the order
-     within the bundle is determined at bundle creation time, and the
-     order among the bundles is FIFO.  However, it's going to be a pain
-     to use a different sorting function for this treap, since it's
-     fixed as part of the treap creation for performance.  Don't fear
-     though; we can pull a cool math trick out of the bag to shoehorn
-     the order we'd like into the sort function we need, and to get even
-     more.
-
-     Recall that the sort function is r_i/c_i, smallest to largest,
-     where r_i is the rewards and c_i is the cost units.  r_i and c_i
-     are both uints, and the comparison is done by cross-multiplication
-     as ulongs.  We actually use the c_i value for testing if
-     transactions fit, etc.  so let's assume that's fixed, and we know
-     it's in the range [1020, 1,556,782].
-
-     This means, if c_0, c_1, ... c_4 are the CU costs of the
-     transactions in the first bundle, we require r_0/c_0 > r_1/c_1 >
-     ... > r_4/c_4.  Then, if c_5, ... c_9 are the CU costs of the
-     transactions in the second bundle, we also require that r_4/c_4 >
-     r_5/c_5.  For convenience, we'll impose a slightly stronger
-     constraint: we want the kth bundle to obey L*(N-k) <= r_i/c_i <
-     L*(N+1-k), for fixed constants L and N, real and integer,
-     respectively, that we'll determine. For example, this means r_4/c_4
-     >= L*N > r_5/c_5.  This enables us to group the transactions in the
-     same bundle more easily.
-
-     For convenience in the math below, we'll set j=N-k and relabel the
-     transactions from the jth bundle c_0, ... c_4.
-     From above, we know that Lj <= r_4/c_4.  We'd like to make it as
-     close as possible given that r_4 is an integers.  Thus, put
-     r_4 = ceil( c_4 * Lj ).  r_4 is clearly an integer, and it satisfies
-     the required inequality because:
-            r_4/c_4 = ceil( c_4 * Lj)/c_4 >= c_4*Lj / c_4 >= Lj.
-
-     Following in the same spirit, put r_3 = ceil( c_3 * (r_4+1)/c_4 ).
-     Again, r_3 is clearly an integer, and
-                r_3/c_3  = ceil(c_3*(r_4+1)/c_4)/c_3
-                        >= (c_3*(r_4+1))/(c_3 * c_4)
-                        >= r_4/c_4 + 1/c_4
-                        >  r_4/c_4.
-     Following the pattern, we put
-                r_2 = ceil( c_2 * (r_3+1)/c_3 )
-                r_1 = ceil( c_1 * (r_2+1)/c_2 )
-                r_0 = ceil( c_0 * (r_1+1)/c_1 )
-     which work for the same reason that as r_3.
-
-     We now need for r_0 to satisfy the final inequality with L, and
-     we'll use this to guide our choice of L.  Theoretically, r_0 can be
-     expressed in terms of L, j, and c_0, ... c_4, but that's a truly
-     inscrutible expression.  Instead, we need some bounds so we can get
-     rid of all the ceil using the property that x <= ceil(x) < x+1.
-                     c_4 * Lj <= r_4 < c_4 * Lj + 1
-     The lower bound on r_3 is easy:
-         r_3 >= c_3 * (c_4 * Lj + 1)/c_4 = c_3 * Lj + c_3/c_4
-     For the upper bound,
-         r_3 < 1 + c_3*(r_4+1)/c_4 < 1 + c_3*(c_4*Lj+1 + 1)/c_4
-                                   = 1 + c_3 * Lj + 2*c_3/c_4
-     Continuing similarly gives
-       c_2*Lj +                     c_2/c_3 + c_2/c_4 <= r_2
-       c_1*Lj +           c_1/c_2 + c_1/c_c + c_1/c_4 <= r_1
-       c_0*Lj + c_0/c_1 + c_0/c_2 + c_0/c_3 + c_0/c_4 <= r_0
-     and
-       r_2 < 1 + c_2*Lj +                       2c_2/c_3 + 2c_2/c_4
-       r_1 < 1 + c_1*Lj +            2c_1/c_2 + 2c_1/c_3 + 2c_1/c_4
-       r_0 < 1 + c_0*Lj + 2c_0/c_1 + 2c_0/c_2 + 2c_0/c_3 + 2c_0/c_4.
-
-     Setting L(j+1)>=(1 + c_0*Lj+2c_0/c_1+2c_0/c_2+2c_0/c_3+2c_0/c_4)/c_0
-     is then sufficient to ensure the whole sequence of 5 fits between Lj
-     and L(j+1).  Simplifying gives
-              L<= 1/c_0 + 2/c_1 + 2/c_2 + 2/c_3 + 2/c_4
-     but L must be a constant and not depend on individual values of c_i,
-     so, given that c_i >= 1020, we set L = 9/1020.
-
-     Now all that remains is to determine N.  It's a bit unfortunate
-     that we require N, since it limits our capacity, but it's necessary
-     in any system that tries to compute priorities to enforce a FIFO
-     order.  If we've inserted more than N bundles without ever having
-     the bundle treap go empty, we'll briefly break the FIFO ordering as
-     we underflow.
-
-     Thus, we'd like to make N as big as possible, avoiding overflow.
-     r_0, ..., r_4 are all uints, and taking the bounds from above,
-     given that for any i, i' c_i/c_{i'} < 1527, we have
-               r_i < 1 + 1556782 * Lj + 8*1527.
-     To avoid overflow, we assert the right-hand side is < 2^32, which
-     implies N <= 312671.
-
-     We want to use a fixed point representation for L so that the
-     entire computation can be done with integer arithmetic.  We can do
-     the arithmetic as ulongs, which means defining L' >= L * 2^s, and
-     we compute ceil( c_4*Lj ) as floor( (c_4 * L' * j + 2^s - 1)/2^s ),
-     so c_4 * L' * j + 2^s should fit in a ulong.  With j<=N, this gives
-     s<=32, so we set s=32, which means L' = 37896771 >= 9/1020 * 2^32.
-     Note that 1 + 1556782 * L' * N + 8*1527 + 2^32 is approximately
-     2^63.999993.
-
-     Note that this is all checked by a proof of the code translated
-     into Z3.  Unfortunately CBMC was too slow to prove this code
-     directly. */
-#define BUNDLE_L_PRIME 37896771UL
 #define BUNDLE_N       312671UL
 
   if( FD_UNLIKELY( pack->relative_bundle_idx>BUNDLE_N ) ) {
@@ -1644,30 +1560,118 @@ fd_pack_insert_bundle_fini( fd_pack_t          * pack,
 
   return (0) | (replaces<<1) | ((!!nonce_txn_cnt)<<2);
 }
+
+static inline ulong 
+extract_tips_from_packet( fd_pack_ord_txn_t * ord ){
+
+    ulong tips = 0;
+
+    fd_txn_t const * txn   = TXN( ord->txn );
+    uchar const * accounts = ord->txn->payload+txn->acct_addr_off;
+
+    for( ulong i=0UL; i<txn->instr_cnt; i++ ){
+
+      fd_txn_instr_t const * instr = txn->instr+i;
+      
+      if( FD_UNLIKELY( instr->acct_cnt<2U ) ) continue;
+      
+      uchar const * instr_data  = ord->txn->payload+instr->data_off;
+      uchar const * instr_accts = ord->txn->payload+instr->acct_off; 
+      uchar const * dest_acct   = &accounts[ FD_TXN_ACCT_ADDR_SZ*instr_accts[ 1 ]  ];
+      uchar const * program_id  = &accounts[ FD_TXN_ACCT_ADDR_SZ*instr->program_id ];
+
+      uint discriminator = 0U;
+      fd_memcpy( &discriminator, instr_data, 4);
+
+        /*FD_LOG_WARNING(( "d: %u", discriminator ));*/
+      if( FD_UNLIKELY( 
+          fd_memeq( program_id, SOLANA_SYSTEM_PROGRAM_SYSVAR, FD_TXN_ACCT_ADDR_SZ )   &&
+          instr->data_sz      >= TRANSFER_IX_MIN_SZ                                   &&
+          discriminator       == TRANSFER_IX_DISCRIMINATOR ) ){
+
+        FD_LOG_WARNING(( "tip_system_transfer in bundle: %lu", ord->bundle_idx ));
+        for( ulong tip_acc_idx=0UL; tip_acc_idx<8UL; tip_acc_idx++ ){
+          if( FD_LIKELY( 0==fd_memeq( dest_acct, JITO_MAINNET_TIP_ACCOUNTS[ tip_acc_idx ], FD_TXN_ACCT_ADDR_SZ ) ) ) continue;
+
+          ulong extracted_tip = 0UL;
+          fd_memcpy( &extracted_tip, instr_data+4, sizeof(ulong) );
+          FD_LOG_WARNING(( "Found a jito tip: %lu", extracted_tip ));
+          /*TODO: This is not safe, as depending on the arch it can either wrap around
+           * or  take the higher order bits. It is safer to check if it crosses UINT_MAX
+           * and handle that case in code.*/
+          tips+=extracted_tip;
+          /*break;*/
+        }
+      } 
+      /*else {*/
+      /*    char encoded_txn_base64[ FD_BASE64_ENC_SZ( FD_TPU_MTU ) ];  */
+      /*    ulong encoded_len = fd_base64_encode( encoded_txn_base64, ord->txn->payload, FD_TPU_MTU );*/
+      /*    if( FD_LIKELY( encoded_len ) ){*/
+      /*      FD_LOG_NOTICE(( "Bundle:Txn:%lu:%lu has payload: %.*s with %u:%u:%u:%u:%u:%u:%u",ord->bundle_idx, ord->idx, (int)encoded_len, encoded_txn_base64, instr->data_off, instr->acct_off, txn->acct_addr_off, instr->program_id, instr_accts[ 1 ], instr->data_sz, discriminator ));*/
+      /**/
+      /*      char buf32[FD_BASE58_ENCODED_32_SZ];*/
+      /*      ulong out_len = 0UL;*/
+      /*      fd_base58_encode_32( dest_acct, &out_len, buf32 );*/
+      /*      FD_LOG_NOTICE(( "dest_address: %.*s",(int)(out_len), buf32 ));*/
+      /*      char buf32_1[FD_BASE58_ENCODED_32_SZ];*/
+      /*      ulong out_len_1 = 0UL;*/
+      /*      fd_base58_encode_32( program_id, &out_len_1, buf32_1 );*/
+      /*      FD_LOG_NOTICE(( "program_address: %.*s\n",(int)(out_len_1), buf32_1 ));*/
+      /*    }*/
+      /*}*/
+    }
+    return tips;
+}
 static inline void
 insert_bundle_impl( fd_pack_t           * pack,
                     ulong                 bundle_idx,
                     ulong                 txn_cnt,
                     fd_pack_ord_txn_t * * bundle,
                     ulong                 expires_at ) {
-  ulong prev_reward = ((BUNDLE_L_PRIME * (BUNDLE_N - bundle_idx))) - 1UL;
-  ulong prev_cost = 1UL<<32;
+  
+  uint cummulative_compute = 0UL;
+  uint cummulative_rew     = 0UL;
+  ulong tips_t             = 0UL;
+  for( ulong i=0UL; i<txn_cnt; i++ ){
+    fd_pack_ord_txn_t * ord = bundle[ i ];
+    ord->idx = i;
+    ord->bundle_idx = bundle_idx;
+    ulong tips = extract_tips_from_packet( ord );
+    cummulative_compute += ord->compute_est;
+    cummulative_rew     += (ord->rewards < (UINT_MAX-tips) ? (uint)(ord->rewards+tips) : UINT_MAX);
+    tips_t              += tips;
+    if( i==txn_cnt-1  ) ord->_next = NULL; 
+    else ord->_next = bundle[ i + 1 ];  
+
+    if( i==0UL ) ord->_prev=NULL;
+    else ord->_prev = bundle[ i-1 ];
+
+  FD_LOG_NOTICE(( "Bundle %lu has txn %lu r:%u c:%u cum_r:%u tips: %lu", bundle_idx, i, ord->rewards, ord->compute_est,  (ord->rewards < (UINT_MAX-tips) ? (uint)(ord->rewards+tips) : UINT_MAX), tips));
+  }
+  /*Add total reward and CU for bundle to first txn in bundle*/
+  fd_pack_ord_txn_t * ptr_bundle = bundle[ 0 ];
+  ptr_bundle->rewards            = cummulative_rew;
+  ptr_bundle->compute_est        = cummulative_compute;
+
+  FD_LOG_NOTICE(( "Bundle %lu has tip %lu r:%u c:%u", bundle_idx, tips_t, cummulative_rew, cummulative_compute ));
 
   /* Assign last to first */
   for( ulong i=0UL; i<txn_cnt; i++ ) {
     fd_pack_ord_txn_t * ord = bundle[ txn_cnt-1UL - i ];
-    ord->rewards = (uint)(((ulong)ord->compute_est * (prev_reward + 1UL) + prev_cost-1UL)/prev_cost);
-    ord->root    = FD_ORD_TXN_ROOT_PENDING_BUNDLE;
-    prev_reward = ord->rewards;
-    prev_cost   = ord->compute_est;
+    /*ord->rewards = (uint)(((ulong)ord->compute_est * (prev_reward + 1UL) + prev_cost-1UL)/prev_cost);*/
+    ord->root       = FD_ORD_TXN_ROOT_PENDING_BUNDLE;
+    /*ord->_head      = ptr_bundle;*/
+    /*prev_reward = ord->rewards;*/
+    /*prev_cost   = ord->compute_est;*/
 
     /* The penalty information isn't used for bundles. */
     ushort penalties  [ FD_TXN_ACCT_ADDR_MAX ];
     uchar  penalty_idx[ FD_TXN_ACCT_ADDR_MAX ];
     populate_bitsets( pack, ord, penalties, penalty_idx );
 
-    treap_ele_insert( pack->pending_bundles, ord, pack->pool );
+    if( i==txn_cnt-1 ) treap_ele_insert( pack->pending_bundles, ptr_bundle, pack->pool );
     pack->pending_txn_cnt++;
+    /*pack->pending_bundle_cnt++;*/
 
     if( FD_UNLIKELY( ord->txn->flags & FD_TXN_P_FLAGS_DURABLE_NONCE ) ) noncemap_ele_insert( pack->noncemap, ord, pack->pool );
     sig2txn_ele_insert( pack->signature_map, ord, pack->pool );
@@ -2188,7 +2192,8 @@ fd_pack_microblock_complete( fd_pack_t * pack,
 static inline int
 fd_pack_try_schedule_bundle( fd_pack_t  * pack,
                              ulong        bank_tile,
-                             fd_txn_p_t * out ) {
+                             fd_txn_p_t * out,
+                             ulong        leader_slot ) {
   int state = pack->initializer_bundle_state;
   if( FD_UNLIKELY( (state==FD_PACK_IB_STATE_PENDING) | (state==FD_PACK_IB_STATE_FAILED ) ) ) return TRY_BUNDLE_NO_READY_BUNDLES;
 
@@ -2212,13 +2217,22 @@ fd_pack_try_schedule_bundle( fd_pack_t  * pack,
 
   treap_rev_iter_t   _txn0 = _cur;
   fd_pack_ord_txn_t * txn0 = treap_rev_iter_ele( _txn0, pool );
+
+  /*fd_pack_ord_txn_t * cur  = treap_rev_iter_ele( _txn0, pool);*/
+  /*while( (txn0->txn_type & FD_PACK_ORD_TXN_TYPE_BUNDLE) & !treap_rev_iter_done( _cur )  ){*/
+  /*     _cur = treap_rev_iter_next( _cur, pool );*/
+  /*    txn0  = treap_rev_iter_ele( _cur, pool);*/
+  /*    continue;*/
+  /*}*/
+  /*cur = NULL;*/
   int is_ib = !!(txn0->txn->flags & FD_TXN_P_FLAGS_INITIALIZER_BUNDLE);
-  bundle_idx = RC_TO_REL_BUNDLE_IDX( txn0->rewards, txn0->compute_est );
+  bundle_idx = txn0->bundle_idx; 
 
   if( FD_UNLIKELY( require_ib & !is_ib ) ) return TRY_BUNDLE_NO_READY_BUNDLES;
 
   /* At this point, we have our candidate bundle, so we'll schedule it
      if we can.  If we can't, we won't schedule anything. */
+  FD_LOG_WARNING(( "Bundle %lu has rev:%u and cu:%u slot: %lu", bundle_idx, txn0->rewards, txn0->compute_est, leader_slot ));
 
 
   fd_pack_addr_use_t * bundle_temp_inserted[ FD_PACK_MAX_TXN_PER_BUNDLE * FD_TXN_ACCT_ADDR_MAX ];
@@ -2246,10 +2260,18 @@ fd_pack_try_schedule_bundle( fd_pack_t  * pack,
   ulong last_use_in_txn_cnt[ 1UL+FD_PACK_MAX_TXN_PER_BUNDLE ] = { 0UL };
 
   fd_pack_addr_use_t   null_use[1]    = {{{{ 0 }}, { 0 }}};
-
+  fd_pack_ord_txn_t * cur = txn0;
+  /*if( FD_LIKELY( !treap_rev_iter_done( _cur ) ) ) cur = treap_rev_iter_ele( _cur, pool );*/
+  /*txn0*/
   while( !(doesnt_fit | has_conflict) & !treap_rev_iter_done( _cur ) ) {
-    fd_pack_ord_txn_t * cur = treap_rev_iter_ele( _cur, pool );
-    ulong this_bundle_idx = RC_TO_REL_BUNDLE_IDX( cur->rewards, cur->compute_est );
+    /*if( FD_LIKELY( cur->txn_type & FD_PACK_ORD_TXN_TYPE_BUNDLE ) ){*/
+    /*  _cur = treap_rev_iter_next( _cur, pool );*/
+    /*  cur  = treap_rev_iter_ele( _cur, pool);*/
+    /*  continue;*/
+    /*}*/
+    /*cur = treap_rev_iter_ele( _cur, pool );*/
+    ulong this_bundle_idx = cur->bundle_idx; 
+    /*FD_LOG_WARNING(( "this_bundle_idx: %lu %lu", this_bundle_idx, bundle_idx ));*/
     if( FD_UNLIKELY( this_bundle_idx!=bundle_idx ) ) break;
 
     if( FD_UNLIKELY( cur->compute_est>cu_limit ) ) {
@@ -2354,7 +2376,13 @@ fd_pack_try_schedule_bundle( fd_pack_t  * pack,
     if( has_conflict | doesnt_fit ) break;
 
     txn_cnt++;
-    _cur = treap_rev_iter_next( _cur, pool );
+    /*_cur = treap_rev_iter_next( _cur, pool );*/
+    cur = cur->_next;
+    /*TODO: Do we do it this way or do we wait for bundle_idx to change?*/
+    if( cur==NULL ) {
+      /*FD_LOG_WARNING(( "breaks here" ));*/
+      break;
+    }
   }
   int retval = fd_int_if( doesnt_fit, TRY_BUNDLE_DOES_NOT_FIT,
                                       fd_int_if( has_conflict, TRY_BUNDLE_HAS_CONFLICTS, TRY_BUNDLE_SUCCESS( (int)txn_cnt ) ) );
@@ -2370,12 +2398,16 @@ fd_pack_try_schedule_bundle( fd_pack_t  * pack,
 
       for( _cur=_txn0; !treap_rev_iter_done( _cur ); _cur=treap_rev_iter_next( _cur, pool ) ) {
         fd_pack_ord_txn_t * cur = treap_rev_iter_ele( _cur, pool );
-        ulong this_bundle_idx = RC_TO_REL_BUNDLE_IDX( cur->rewards, cur->compute_est );
-        if( FD_UNLIKELY( this_bundle_idx!=bundle_idx ) ) break;
+        while( cur!=NULL ) {
+            /*ulong this_bundle_idx = RC_TO_REL_BUNDLE_IDX( cur->rewards, cur->compute_est );*/
+            ulong this_bundle_idx = cur->bundle_idx;
+            if( FD_UNLIKELY( this_bundle_idx!=bundle_idx ) ) return retval;
 
-        /* See fd_pack_schedule_impl for this line */
-        cur->skip = (ushort)(1+fd_ushort_min( (ushort)(pack->compressed_slot_number-1),
-              (ushort)(fd_ushort_min( cur->skip, FD_PACK_SKIP_CNT )-2) ) );
+            /* See fd_pack_schedule_impl for this line */
+            cur->skip = (ushort)(1+fd_ushort_min( (ushort)(pack->compressed_slot_number-1),
+                  (ushort)(fd_ushort_min( cur->skip, FD_PACK_SKIP_CNT )-2) ) );
+            cur = cur->_next;
+        }
       }
     }
     return retval;
@@ -2384,8 +2416,9 @@ fd_pack_try_schedule_bundle( fd_pack_t  * pack,
   /* This bundle passed validation, so now we'll take it! */
   pack->outstanding_microblock_mask |= bank_tile_mask;
 
-  treap_rev_iter_t   _end  = _cur;
-  treap_rev_iter_t   _next;
+  /*treap_rev_iter_t   _end  = _cur;*/
+  /*treap_rev_iter_t   _next;*/
+  fd_pack_ord_txn_t *  _next = txn0; 
 
   /* We'll carefully incrementally construct use_by_bank and
      use_by_bank_txn based on the contents of bundle_temp and
@@ -2397,10 +2430,11 @@ fd_pack_try_schedule_bundle( fd_pack_t  * pack,
   pack->use_by_bank_cnt[bank_tile] = cum_sum;
 
 
-  for( _cur=_txn0; _cur!=_end; _cur=_next ) {
-    _next = treap_rev_iter_next( _cur, pool );
+  for( cur=_next; cur!=NULL; cur=_next ) {
+    /*_next = treap_rev_iter_next( _cur, pool );*/
+    _next = cur->_next;
 
-    fd_pack_ord_txn_t * cur = treap_rev_iter_ele( _cur, pool );
+    /*fd_pack_ord_txn_t * cur = treap_rev_iter_ele( _cur, pool );*/
     fd_txn_t const    * txn = TXN(cur->txn);
     fd_memcpy( out->payload, cur->txn->payload, cur->txn->payload_sz                                           );
     fd_memcpy( TXN(out),     txn,               fd_txn_footprint( txn->instr_cnt, txn->addr_table_lookup_cnt ) );
@@ -2422,8 +2456,9 @@ fd_pack_try_schedule_bundle( fd_pack_t  * pack,
 
     cur->root = FD_ORD_TXN_ROOT_FREE;
     expq_remove( pack->expiration_q, cur->expq_idx );
-    treap_idx_remove( pack->pending_bundles, _cur, pack->pool );
-    trp_pool_idx_release( pack->pool, _cur );
+    if( cur==txn0 ) treap_idx_remove( pack->pending_bundles, _cur, pack->pool );
+    /*ulong txn_to_del  = trp_pool_idx( pack->pool, cur );*/
+    trp_pool_ele_release( pack->pool, cur );
     pack->pending_txn_cnt--;
   }
 
@@ -2479,7 +2514,8 @@ fd_pack_schedule_next_microblock( fd_pack_t *  pack,
                                   float        vote_fraction,
                                   ulong        bank_tile,
                                   int          schedule_flags,
-                                  fd_txn_p_t * out ) {
+                                  fd_txn_p_t * out,
+                                  ulong        leader_slot ) {
 
   /* TODO: Decide if these are exactly how we want to handle limits */
   total_cus = fd_ulong_min( total_cus, pack->lim->max_cost_per_block - pack->cumulative_block_cost );
@@ -2525,7 +2561,7 @@ fd_pack_schedule_next_microblock( fd_pack_t *  pack,
   /* Bundle can't mix with votes, so only try to schedule a bundle if we
      didn't get any votes. */
   if( FD_UNLIKELY( !!(schedule_flags & FD_PACK_SCHEDULE_BUNDLE) & (status1.txns_scheduled==0UL) ) ) {
-    int bundle_result = fd_pack_try_schedule_bundle( pack, bank_tile, out );
+    int bundle_result = fd_pack_try_schedule_bundle( pack, bank_tile, out , leader_slot );
     if( FD_UNLIKELY( bundle_result>0                         ) ) return (ulong)bundle_result;
     if( FD_UNLIKELY( bundle_result==TRY_BUNDLE_HAS_CONFLICTS ) ) return 0UL;
     /* in the NO_READY_BUNDLES or DOES_NOT_FIT case, we schedule like
@@ -2758,6 +2794,31 @@ release_tree( treap_t           * treap,
     }
   }
 }
+static void
+release_tree_with_ll( treap_t           * treap,
+              sig2txn_t         * signature_map,
+              noncemap_t        * noncemap,
+              fd_pack_ord_txn_t * pool ) {
+  treap_fwd_iter_t next;
+  fd_pack_ord_txn_t * cur = NULL;
+  for( treap_fwd_iter_t it=treap_fwd_iter_init( treap, pool ); !treap_fwd_iter_done( it ); it=next ) {
+    next = treap_fwd_iter_next( it, pool );
+    cur = treap_fwd_iter_ele( it, pool );
+    /*ulong idx = treap_fwd_iter_idx( it );*/
+    treap_ele_remove       ( treap,         cur, pool );
+    while(cur!=NULL){
+      cur->root = FD_ORD_TXN_ROOT_FREE;
+      sig2txn_ele_remove_fast( signature_map, cur, pool );
+      trp_pool_ele_release   ( pool,          cur       );
+      if( cur->txn->flags & FD_TXN_P_FLAGS_DURABLE_NONCE ) {
+        noncemap_ele_remove_fast( noncemap, cur, pool );
+      }
+      /*idx++;*/
+      cur = cur->_next;
+
+    }
+  }
+}
 
 void
 fd_pack_clear_all( fd_pack_t * pack ) {
@@ -2774,7 +2835,8 @@ fd_pack_clear_all( fd_pack_t * pack ) {
 
   release_tree( pack->pending,         pack->signature_map, pack->noncemap, pack->pool );
   release_tree( pack->pending_votes,   pack->signature_map, pack->noncemap, pack->pool );
-  release_tree( pack->pending_bundles, pack->signature_map, pack->noncemap, pack->pool );
+  /*release_tree( pack->pending_bundles, pack->signature_map, pack->noncemap, pack->pool );*/
+  release_tree_with_ll( pack->pending_bundles, pack->signature_map, pack->noncemap, pack->pool );
 
   ulong const pool_max = trp_pool_max( pack->pool );
   for( ulong i=0UL; i<pool_max; i++ ) {
@@ -2784,6 +2846,7 @@ fd_pack_clear_all( fd_pack_t * pack ) {
       fd_acct_addr_t const * accts   = fd_txn_get_acct_addrs( txn, del->txn->payload );
       fd_acct_addr_t const * alt_adj = del->txn_e->alt_accts - fd_txn_account_cnt( txn, FD_TXN_ACCT_CAT_IMM );
       fd_acct_addr_t penalty_acct = *ACCT_IDX_TO_PTR( FD_ORD_TXN_ROOT_PENALTY_ACCT_IDX( del->root ) );
+      FD_LOG_WARNING(( "idx: %lu id: %lu n: %lu %p %lu %lu", del->bundle_idx, del->idx, (ulong)*(&del->txn->payload[1]), (void*)del->_prev, i, pool_max ));
       fd_pack_penalty_treap_t * penalty_treap = penalty_map_query( pack->penalty_treaps, penalty_acct, NULL );
       FD_TEST( penalty_treap );
       release_tree( penalty_treap->penalty_treap, pack->signature_map, pack->noncemap, pack->pool );
@@ -2821,7 +2884,6 @@ delete_transaction( fd_pack_t         * pack,
                     fd_pack_ord_txn_t * containing,
                     int                 delete_full_bundle,
                     int                 move_from_penalty_treap ) {
-
   fd_txn_t * txn = TXN( containing->txn );
   fd_acct_addr_t const * accts   = fd_txn_get_acct_addrs( txn, containing->txn->payload );
   fd_acct_addr_t const * alt_adj = containing->txn_e->alt_accts - fd_txn_account_cnt( txn, FD_TXN_ACCT_CAT_IMM );
@@ -2844,35 +2906,35 @@ delete_transaction( fd_pack_t         * pack,
   }
 
   ulong delete_cnt = 0UL;
+  /*Honestly we can make this logic simpler by just checking root_idx mask*/
   if( FD_UNLIKELY( delete_full_bundle & (root==pack->pending_bundles) ) ) {
     /* When we delete, the structure of the treap may move around, but
        pointers to inside the pool will remain valid */
     fd_pack_ord_txn_t * bundle_ptrs[ FD_PACK_MAX_TXN_PER_BUNDLE-1UL ];
-    fd_pack_ord_txn_t * pool       = pack->pool;
+    /*fd_pack_ord_txn_t * pool       = pack->pool;*/
     ulong               cnt        = 0UL;
-    ulong               bundle_idx = RC_TO_REL_BUNDLE_IDX( containing->rewards, containing->compute_est );
+    ulong               bundle_idx = containing->bundle_idx; 
 
-    /* Iterate in both directions from the current transaction */
-    for( treap_fwd_iter_t _cur=treap_fwd_iter_next( (treap_fwd_iter_t)treap_idx_fast( containing, pool ), pool );
-        !treap_fwd_iter_done( _cur ); _cur=treap_fwd_iter_next( _cur, pool ) ) {
-      fd_pack_ord_txn_t * cur = treap_fwd_iter_ele( _cur, pool );
-      if( FD_LIKELY( bundle_idx==RC_TO_REL_BUNDLE_IDX( cur->rewards, cur->compute_est ) ) ) {
+    fd_pack_ord_txn_t * cur = containing->_prev;
+    while( cur!=NULL ){
+      if( FD_LIKELY( bundle_idx==cur->bundle_idx) ) {
         bundle_ptrs[ cnt++ ] = cur;
       } else {
         break;
       }
       FD_TEST( cnt<FD_PACK_MAX_TXN_PER_BUNDLE );
+      cur=cur->_prev;
     }
 
-    for( treap_rev_iter_t _cur=treap_rev_iter_next( (treap_rev_iter_t)treap_idx_fast( containing, pool ), pool );
-        !treap_rev_iter_done( _cur ); _cur=treap_rev_iter_next( _cur, pool ) ) {
-      fd_pack_ord_txn_t * cur = treap_rev_iter_ele( _cur, pool );
-      if( FD_LIKELY( bundle_idx==RC_TO_REL_BUNDLE_IDX( cur->rewards, cur->compute_est ) ) ) {
+    cur = containing->_next;
+    while( cur!=NULL ){
+      if( FD_LIKELY( bundle_idx==cur->bundle_idx) ) {
         bundle_ptrs[ cnt++ ] = cur;
       } else {
         break;
       }
       FD_TEST( cnt<FD_PACK_MAX_TXN_PER_BUNDLE );
+      cur=cur->_next;
     }
 
     /* Delete them each, setting delete_full_bundle to 0 to avoid
@@ -2883,6 +2945,7 @@ delete_transaction( fd_pack_t         * pack,
 
   if( FD_UNLIKELY( move_from_penalty_treap & (root==pack->pending) ) ) {
 
+    FD_LOG_INFO(( "Deleting bundle with index %lu", containing->bundle_idx ));
     fd_pack_ord_txn_t       * best         = NULL;
     fd_pack_penalty_treap_t * best_penalty = NULL;
 
@@ -2928,7 +2991,10 @@ delete_transaction( fd_pack_t         * pack,
   }
   expq_remove( pack->expiration_q, containing->expq_idx );
   containing->root = FD_ORD_TXN_ROOT_FREE;
-  treap_ele_remove( root, containing, pack->pool );
+  if( ((containing->txn->flags & FD_TXN_P_FLAGS_BUNDLE) && (containing->_prev==NULL)) ||
+      (containing->bundle_idx==ULONG_MAX) ){
+    treap_ele_remove( root, containing, pack->pool );
+  }
   sig2txn_ele_remove_fast( pack->signature_map, containing, pack->pool );
   trp_pool_ele_release( pack->pool, containing );
 
@@ -3047,78 +3113,154 @@ fd_pack_verify( fd_pack_t * pack,
       treap = pack->penalty_treaps[ k-3UL ].penalty_treap;
       VERIFY_TEST( treap_ele_cnt( treap )>0UL, "empty penalty treap in map" );
     }
+    if( k==2 ){
 
-    for( treap_rev_iter_t _cur=treap_rev_iter_init( treap, pool ); !treap_rev_iter_done( _cur );
-        _cur=treap_rev_iter_next( _cur, pool ) ) {
-      txn_cnt++;
-      fd_pack_ord_txn_t const * cur = treap_rev_iter_ele_const( _cur, pool );
-      fd_txn_t const * txn = TXN(cur->txn);
-      fd_acct_addr_t const * accts   = fd_txn_get_acct_addrs( txn, cur->txn->payload );
-      fd_acct_addr_t const * alt_adj = cur->txn_e->alt_accts - fd_txn_account_cnt( txn, FD_TXN_ACCT_CAT_IMM );
+      for( treap_rev_iter_t _cur=treap_rev_iter_init( treap, pool ); !treap_rev_iter_done( _cur );
+          _cur=treap_rev_iter_next( _cur, pool ) ) {
+        fd_pack_ord_txn_t const * cur = treap_rev_iter_ele_const( _cur, pool );
+        while(cur!=NULL){
 
-      fd_ed25519_sig_t const * sig0 = fd_txn_get_signatures( txn, cur->txn->payload );
+        /*txn_cnt+=cur->txn_cnt;*/
+          txn_cnt++;
+        fd_txn_t const * txn = TXN(cur->txn);
 
-      fd_pack_ord_txn_t const * in_tbl = sig2txn_ele_query_const( pack->signature_map, (wrapped_sig_t const *)sig0, NULL, pool );
-      VERIFY_TEST( in_tbl, "signature missing from sig2txn" );
+        fd_acct_addr_t const * accts   = fd_txn_get_acct_addrs( txn, cur->txn->payload );
+        fd_acct_addr_t const * alt_adj = cur->txn_e->alt_accts - fd_txn_account_cnt( txn, FD_TXN_ACCT_CAT_IMM );
 
-      VERIFY_TEST( (ulong)(cur->root & FD_ORD_TXN_ROOT_TAG_MASK)==fd_ulong_min( k, 3UL )+1UL, "treap element had bad root" );
-      if( FD_LIKELY( (cur->root & FD_ORD_TXN_ROOT_TAG_MASK)==FD_ORD_TXN_ROOT_PENALTY(0) ) ) {
-        fd_acct_addr_t const * penalty_acct = ACCT_IDX_TO_PTR( FD_ORD_TXN_ROOT_PENALTY_ACCT_IDX( cur->root ) );
-        VERIFY_TEST( !memcmp( penalty_acct, pack->penalty_treaps[ k-3UL ].key.b, 32UL ), "transaction in wrong penalty treap" );
-      }
-      VERIFY_TEST( cur->expires_at>=pack->expire_before, "treap element expired" );
+        fd_ed25519_sig_t const * sig0 = fd_txn_get_signatures( txn, cur->txn->payload );
 
-      fd_pack_expq_t const * eq = pack->expiration_q + cur->expq_idx;
-      VERIFY_TEST( eq->txn==cur, "expq inconsistent" );
-      VERIFY_TEST( eq->expires_at==cur->expires_at, "expq expires_at inconsistent" );
+        fd_pack_ord_txn_t const * in_tbl = sig2txn_ele_query_const( pack->signature_map, (wrapped_sig_t const *)sig0, NULL, pool );
+        VERIFY_TEST( in_tbl, "signature missing from sig2txn" );
 
-      FD_PACK_BITSET_DECLARE( complement );
-      FD_PACK_BITSET_COPY( complement, full );
-      for( fd_txn_acct_iter_t iter=fd_txn_acct_iter_init( txn, FD_TXN_ACCT_CAT_WRITABLE );
-          iter!=fd_txn_acct_iter_end(); iter=fd_txn_acct_iter_next( iter ) ) {
-        fd_acct_addr_t acct = *ACCT_ITER_TO_PTR( iter );
-
-        fd_pack_bitset_acct_mapping_t * q = bitset_map_query( bitset_copy, acct, NULL );
-        VERIFY_TEST( q, "account in transaction missing from bitset mapping" );
-        VERIFY_TEST( q->ref_cnt>0UL, "account in transaction ref_cnt already 0" );
-        q->ref_cnt--;
-        total_references--;
-
-        FD_PACK_BITSET_CLEAR( bit );
-        FD_PACK_BITSET_SETN( bit, q->bit );
-        if( q->bit<FD_PACK_BITSET_MAX ) {
-          VERIFY_TEST( !FD_PACK_BITSET_INTERSECT4_EMPTY( bit, bit, cur->rw_bitset, cur->rw_bitset ), "missing from rw bitset" );
-          VERIFY_TEST( !FD_PACK_BITSET_INTERSECT4_EMPTY( bit, bit, cur->w_bitset,  cur->w_bitset  ), "missing from w bitset" );
+        VERIFY_TEST( (ulong)(cur->root & FD_ORD_TXN_ROOT_TAG_MASK)==fd_ulong_min( k, 3UL )+1UL, "treap element had bad root" );
+        if( FD_LIKELY( (cur->root & FD_ORD_TXN_ROOT_TAG_MASK)==FD_ORD_TXN_ROOT_PENALTY(0) ) ) {
+          fd_acct_addr_t const * penalty_acct = ACCT_IDX_TO_PTR( FD_ORD_TXN_ROOT_PENALTY_ACCT_IDX( cur->root ) );
+          VERIFY_TEST( !memcmp( penalty_acct, pack->penalty_treaps[ k-3UL ].key.b, 32UL ), "transaction in wrong penalty treap" );
         }
-        FD_PACK_BITSET_CLEARN( complement, q->bit );
-      }
-      VERIFY_TEST( FD_PACK_BITSET_INTERSECT4_EMPTY( complement, complement, cur->w_bitset,  cur->w_bitset ), "extra in w bitset" );
+        VERIFY_TEST( cur->expires_at>=pack->expire_before, "treap element expired" );
 
-      for( fd_txn_acct_iter_t iter=fd_txn_acct_iter_init( txn, FD_TXN_ACCT_CAT_READONLY );
-          iter!=fd_txn_acct_iter_end(); iter=fd_txn_acct_iter_next( iter ) ) {
+        fd_pack_expq_t const * eq = pack->expiration_q + cur->expq_idx;
+        VERIFY_TEST( eq->txn==cur, "expq inconsistent" );
+        VERIFY_TEST( eq->expires_at==cur->expires_at, "expq expires_at inconsistent" );
 
-        fd_acct_addr_t acct = *ACCT_ITER_TO_PTR( iter );
-        if( FD_UNLIKELY( fd_pack_unwritable_contains( &acct ) ) ) continue;
-        fd_pack_bitset_acct_mapping_t * q = bitset_map_query( bitset_copy, acct, NULL );
-        VERIFY_TEST( q, "account in transaction missing from bitset mapping" );
-        VERIFY_TEST( q->ref_cnt>0UL, "account in transaction ref_cnt already 0" );
-        q->ref_cnt--;
-        total_references--;
+        FD_PACK_BITSET_DECLARE( complement );
+        FD_PACK_BITSET_COPY( complement, full );
+        for( fd_txn_acct_iter_t iter=fd_txn_acct_iter_init( txn, FD_TXN_ACCT_CAT_WRITABLE );
+            iter!=fd_txn_acct_iter_end(); iter=fd_txn_acct_iter_next( iter ) ) {
+          fd_acct_addr_t acct = *ACCT_ITER_TO_PTR( iter );
 
-        FD_PACK_BITSET_CLEAR( bit );
-        FD_PACK_BITSET_SETN( bit, q->bit );
-        if( q->bit<FD_PACK_BITSET_MAX ) {
-          VERIFY_TEST( !FD_PACK_BITSET_INTERSECT4_EMPTY( bit, bit, cur->rw_bitset, cur->rw_bitset ), "missing from rw bitset" );
+          fd_pack_bitset_acct_mapping_t * q = bitset_map_query( bitset_copy, acct, NULL );
+          VERIFY_TEST( q, "account in transaction missing from bitset mapping" );
+          VERIFY_TEST( q->ref_cnt>0UL, "account in transaction ref_cnt already 0" );
+          q->ref_cnt--;
+          total_references--;
+
+          FD_PACK_BITSET_CLEAR( bit );
+          FD_PACK_BITSET_SETN( bit, q->bit );
+          if( q->bit<FD_PACK_BITSET_MAX ) {
+            VERIFY_TEST( !FD_PACK_BITSET_INTERSECT4_EMPTY( bit, bit, cur->rw_bitset, cur->rw_bitset ), "missing from rw bitset" );
+            VERIFY_TEST( !FD_PACK_BITSET_INTERSECT4_EMPTY( bit, bit, cur->w_bitset,  cur->w_bitset  ), "missing from w bitset" );
+          }
+          FD_PACK_BITSET_CLEARN( complement, q->bit );
         }
-        FD_PACK_BITSET_CLEARN( complement, q->bit );
+        VERIFY_TEST( FD_PACK_BITSET_INTERSECT4_EMPTY( complement, complement, cur->w_bitset,  cur->w_bitset ), "extra in w bitset" );
+
+        for( fd_txn_acct_iter_t iter=fd_txn_acct_iter_init( txn, FD_TXN_ACCT_CAT_READONLY );
+            iter!=fd_txn_acct_iter_end(); iter=fd_txn_acct_iter_next( iter ) ) {
+
+          fd_acct_addr_t acct = *ACCT_ITER_TO_PTR( iter );
+          if( FD_UNLIKELY( fd_pack_unwritable_contains( &acct ) ) ) continue;
+          fd_pack_bitset_acct_mapping_t * q = bitset_map_query( bitset_copy, acct, NULL );
+          VERIFY_TEST( q, "account in transaction missing from bitset mapping" );
+          VERIFY_TEST( q->ref_cnt>0UL, "account in transaction ref_cnt already 0" );
+          q->ref_cnt--;
+          total_references--;
+
+          FD_PACK_BITSET_CLEAR( bit );
+          FD_PACK_BITSET_SETN( bit, q->bit );
+          if( q->bit<FD_PACK_BITSET_MAX ) {
+            VERIFY_TEST( !FD_PACK_BITSET_INTERSECT4_EMPTY( bit, bit, cur->rw_bitset, cur->rw_bitset ), "missing from rw bitset" );
+          }
+          FD_PACK_BITSET_CLEARN( complement, q->bit );
+        }
+        VERIFY_TEST( FD_PACK_BITSET_INTERSECT4_EMPTY( complement, complement, cur->rw_bitset,  cur->rw_bitset ), "extra in rw bitset" );
+        cur = cur->_next;
+        }
       }
-      VERIFY_TEST( FD_PACK_BITSET_INTERSECT4_EMPTY( complement, complement, cur->rw_bitset,  cur->rw_bitset ), "extra in rw bitset" );
+    }else{
+
+      for( treap_rev_iter_t _cur=treap_rev_iter_init( treap, pool ); !treap_rev_iter_done( _cur );
+          _cur=treap_rev_iter_next( _cur, pool ) ) {
+        fd_pack_ord_txn_t const * cur = treap_rev_iter_ele_const( _cur, pool );
+        /*txn_cnt+=cur->txn_cnt;*/
+        txn_cnt++;
+        fd_txn_t const * txn = TXN(cur->txn);
+        fd_acct_addr_t const * accts   = fd_txn_get_acct_addrs( txn, cur->txn->payload );
+        fd_acct_addr_t const * alt_adj = cur->txn_e->alt_accts - fd_txn_account_cnt( txn, FD_TXN_ACCT_CAT_IMM );
+
+        fd_ed25519_sig_t const * sig0 = fd_txn_get_signatures( txn, cur->txn->payload );
+
+        fd_pack_ord_txn_t const * in_tbl = sig2txn_ele_query_const( pack->signature_map, (wrapped_sig_t const *)sig0, NULL, pool );
+        VERIFY_TEST( in_tbl, "signature missing from sig2txn" );
+
+        VERIFY_TEST( (ulong)(cur->root & FD_ORD_TXN_ROOT_TAG_MASK)==fd_ulong_min( k, 3UL )+1UL, "treap element had bad root" );
+        if( FD_LIKELY( (cur->root & FD_ORD_TXN_ROOT_TAG_MASK)==FD_ORD_TXN_ROOT_PENALTY(0) ) ) {
+          fd_acct_addr_t const * penalty_acct = ACCT_IDX_TO_PTR( FD_ORD_TXN_ROOT_PENALTY_ACCT_IDX( cur->root ) );
+          VERIFY_TEST( !memcmp( penalty_acct, pack->penalty_treaps[ k-3UL ].key.b, 32UL ), "transaction in wrong penalty treap" );
+        }
+        VERIFY_TEST( cur->expires_at>=pack->expire_before, "treap element expired" );
+
+        fd_pack_expq_t const * eq = pack->expiration_q + cur->expq_idx;
+        VERIFY_TEST( eq->txn==cur, "expq inconsistent" );
+        VERIFY_TEST( eq->expires_at==cur->expires_at, "expq expires_at inconsistent" );
+
+        FD_PACK_BITSET_DECLARE( complement );
+        FD_PACK_BITSET_COPY( complement, full );
+        for( fd_txn_acct_iter_t iter=fd_txn_acct_iter_init( txn, FD_TXN_ACCT_CAT_WRITABLE );
+            iter!=fd_txn_acct_iter_end(); iter=fd_txn_acct_iter_next( iter ) ) {
+          fd_acct_addr_t acct = *ACCT_ITER_TO_PTR( iter );
+
+          fd_pack_bitset_acct_mapping_t * q = bitset_map_query( bitset_copy, acct, NULL );
+          VERIFY_TEST( q, "account in transaction missing from bitset mapping" );
+          VERIFY_TEST( q->ref_cnt>0UL, "account in transaction ref_cnt already 0" );
+          q->ref_cnt--;
+          total_references--;
+
+          FD_PACK_BITSET_CLEAR( bit );
+          FD_PACK_BITSET_SETN( bit, q->bit );
+          if( q->bit<FD_PACK_BITSET_MAX ) {
+            VERIFY_TEST( !FD_PACK_BITSET_INTERSECT4_EMPTY( bit, bit, cur->rw_bitset, cur->rw_bitset ), "missing from rw bitset" );
+            VERIFY_TEST( !FD_PACK_BITSET_INTERSECT4_EMPTY( bit, bit, cur->w_bitset,  cur->w_bitset  ), "missing from w bitset" );
+          }
+          FD_PACK_BITSET_CLEARN( complement, q->bit );
+        }
+        VERIFY_TEST( FD_PACK_BITSET_INTERSECT4_EMPTY( complement, complement, cur->w_bitset,  cur->w_bitset ), "extra in w bitset" );
+
+        for( fd_txn_acct_iter_t iter=fd_txn_acct_iter_init( txn, FD_TXN_ACCT_CAT_READONLY );
+            iter!=fd_txn_acct_iter_end(); iter=fd_txn_acct_iter_next( iter ) ) {
+
+          fd_acct_addr_t acct = *ACCT_ITER_TO_PTR( iter );
+          if( FD_UNLIKELY( fd_pack_unwritable_contains( &acct ) ) ) continue;
+          fd_pack_bitset_acct_mapping_t * q = bitset_map_query( bitset_copy, acct, NULL );
+          VERIFY_TEST( q, "account in transaction missing from bitset mapping" );
+          VERIFY_TEST( q->ref_cnt>0UL, "account in transaction ref_cnt already 0" );
+          q->ref_cnt--;
+          total_references--;
+
+          FD_PACK_BITSET_CLEAR( bit );
+          FD_PACK_BITSET_SETN( bit, q->bit );
+          if( q->bit<FD_PACK_BITSET_MAX ) {
+            VERIFY_TEST( !FD_PACK_BITSET_INTERSECT4_EMPTY( bit, bit, cur->rw_bitset, cur->rw_bitset ), "missing from rw bitset" );
+          }
+          FD_PACK_BITSET_CLEARN( complement, q->bit );
+        }
+        VERIFY_TEST( FD_PACK_BITSET_INTERSECT4_EMPTY( complement, complement, cur->rw_bitset,  cur->rw_bitset ), "extra in rw bitset" );
+      }
     }
   }
 
   bitset_map_leave( bitset_copy );
   VERIFY_TEST( txn_cnt==pack->pending_txn_cnt, "txn_cnt" );
-
   VERIFY_TEST( total_references==0UL, "extra references in bitset mapping" );
   ulong sig2txn_key_cnt = 0UL;
   for( sig2txn_iter_t iter = sig2txn_iter_init( pack->signature_map, pool );

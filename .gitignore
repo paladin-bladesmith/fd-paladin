@@ -80,3 +80,5 @@ deps-bundle.tar.zst
 # Python
 venv
 *.pyc
+txgen
+*.patch
